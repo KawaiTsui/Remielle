@@ -98,27 +98,6 @@ const _animationDurations = <String, Duration>{
   'assets/animations/e.gif': Duration(milliseconds: 5400),
 };
 
-File get _animationLogFile {
-  final localAppData = Platform.environment['LOCALAPPDATA'];
-  final base = localAppData == null || localAppData.isEmpty
-      ? Directory.systemTemp.path
-      : localAppData;
-  return File('$base\\Remielle\\logs\\animation.log');
-}
-
-void _animationLog(String message) {
-  if (Platform.environment.containsKey('FLUTTER_TEST')) return;
-  try {
-    final file = _animationLogFile;
-    file.parent.createSync(recursive: true);
-    file.writeAsStringSync(
-      '${DateTime.now().toIso8601String()} [pid=$pid] $message\r\n',
-      mode: FileMode.append,
-      flush: true,
-    );
-  } catch (_) {}
-}
-
 File get _petEventFile {
   final localAppData = Platform.environment['LOCALAPPDATA'];
   final base = localAppData == null || localAppData.isEmpty
@@ -164,7 +143,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   @override
   void initState() {
     super.initState();
-    _animationLog('PetHome init; animation=$_animation asset=$_animationAsset');
     windowManager.addListener(this);
     trayManager.addListener(this);
     _initialize();
@@ -196,7 +174,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   @override
   void dispose() {
-    _animationLog('PetHome dispose; animation=$_animation');
     _randomNormalTimer?.cancel();
     _eventPoller?.cancel();
     _longPressTimer?.cancel();
@@ -309,26 +286,17 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   void _playAnimation(_PetAnimation animation) {
-    final previous = _animation;
     _randomNormalTimer?.cancel();
     _animationCompletionTimer?.cancel();
     setState(() {
       _animation = animation;
       _animationRevision++;
     });
-    _animationLog(
-      'playAnimation $previous -> $animation; asset=$_animationAsset; '
-      'revision=$_animationRevision; windowDragging=$_windowDragging',
-    );
     if (animation != _PetAnimation.normal &&
         animation != _PetAnimation.busy &&
         !_windowDragging) {
       final duration = _animationDurations[_animationAsset];
       if (duration != null) {
-        _animationLog(
-          'schedule fallback; animation=$animation; '
-          'delayMs=${duration.inMilliseconds + 100}',
-        );
         _animationCompletionTimer = Timer(
           duration + const Duration(milliseconds: 100),
           () => _onAnimationCompleted('fallback-timer-fired'),
@@ -338,10 +306,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   void _onPointerDown(PointerDownEvent event) {
-    _animationLog(
-      'pointerDown; buttons=${event.buttons}; position=${event.position}; '
-      'animation=$_animation; windowDragging=$_windowDragging',
-    );
     if (event.buttons != kPrimaryMouseButton) return;
     _pointerDownPosition = event.position;
     _pointerDragging = false;
@@ -350,7 +314,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _longPressTimer = Timer(const Duration(milliseconds: 250), () {
       if (!mounted || _pointerDownPosition == null || _pointerDragging) return;
       _longPressTriggered = true;
-      _animationLog('longPress timer fired; animation=$_animation');
       _playAnimation(_PetAnimation.longPress);
     });
   }
@@ -359,9 +322,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final origin = _pointerDownPosition;
     if (origin == null || _pointerDragging) return;
     if ((event.position - origin).distance < 10) return;
-    _animationLog(
-      'drag threshold crossed; distance=${(event.position - origin).distance}',
-    );
     _pointerDragging = true;
     _longPressTimer?.cancel();
     _startWindowDrag();
@@ -369,21 +329,15 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   Future<void> _startWindowDrag() async {
     _windowDragging = true;
-    _animationLog('startWindowDrag entered; animation=$_animation');
     if (_animation != _PetAnimation.longPress) {
       _playAnimation(_PetAnimation.longPress);
     } else {
       setState(() {});
     }
     await WidgetsBinding.instance.endOfFrame;
-    _animationLog(
-      'startWindowDrag after frame; mounted=$mounted; '
-      'windowDragging=$_windowDragging; animation=$_animation',
-    );
     if (!mounted || !_windowDragging) return;
     try {
       await windowManager.startDragging();
-      _animationLog('native startDragging returned; animation=$_animation');
       _finishWindowDrag('native-startDragging-returned');
     } on MissingPluginException {
       // Widget tests do not load the native window manager plugin.
@@ -391,11 +345,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   void _onPointerUp(PointerUpEvent event) {
-    _animationLog(
-      'pointerUp; pointerDragging=$_pointerDragging; '
-      'longPressTriggered=$_longPressTriggered; windowDragging=$_windowDragging; '
-      'animation=$_animation',
-    );
     _longPressTimer?.cancel();
     if (_pointerDownPosition != null &&
         !_pointerDragging &&
@@ -406,9 +355,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
-    _animationLog(
-      'pointerCancel; windowDragging=$_windowDragging; animation=$_animation',
-    );
     _longPressTimer?.cancel();
     _resetPointerGesture();
   }
@@ -421,36 +367,21 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   @override
   void onWindowMoved() {
-    _animationLog(
-      'onWindowMoved; mounted=$mounted; windowDragging=$_windowDragging; '
-      'animation=$_animation',
-    );
     _finishWindowDrag('onWindowMoved');
   }
 
   void _finishWindowDrag(String source) {
     if (!_windowDragging || !mounted) {
-      _animationLog(
-        'finishWindowDrag ignored; source=$source; mounted=$mounted; '
-        'windowDragging=$_windowDragging',
-      );
       return;
     }
-    _animationLog('finishWindowDrag; source=$source; animation=$_animation');
     _windowDragging = false;
     _playAnimation(_PetAnimation.normal);
     _scheduleRandomNormalEnd();
   }
 
   void _onAnimationCompleted(String source) {
-    _animationLog(
-      'animationCompleted source=$source; mounted=$mounted; '
-      'animation=$_animation; asset=$_animationAsset; '
-      'windowDragging=$_windowDragging',
-    );
     if (!mounted) return;
     if (_animation == _PetAnimation.normal || _windowDragging) {
-      _animationLog('animationCompleted ignored; source=$source');
       return;
     }
     _animationCompletionTimer?.cancel();
@@ -542,10 +473,6 @@ class _AnimatedGifState extends State<AnimatedGif> {
   @override
   void initState() {
     super.initState();
-    _animationLog(
-      'AnimatedGif init; asset=${widget.asset}; revision=${widget.revision}; '
-      'loop=${widget.loop}',
-    );
     _load();
   }
 
@@ -554,10 +481,6 @@ class _AnimatedGifState extends State<AnimatedGif> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.asset != widget.asset ||
         oldWidget.revision != widget.revision) {
-      _animationLog(
-        'AnimatedGif update; ${oldWidget.asset}:${oldWidget.revision} -> '
-        '${widget.asset}:${widget.revision}; loop=${widget.loop}',
-      );
       _generation++;
       _timer?.cancel();
       _codec?.dispose();
@@ -569,9 +492,6 @@ class _AnimatedGifState extends State<AnimatedGif> {
 
   Future<void> _load() async {
     final generation = _generation;
-    _animationLog(
-      'codec load start; asset=${widget.asset}; generation=$generation',
-    );
     final data = await rootBundle.load(widget.asset);
     final codec = await ui.instantiateImageCodec(Uint8List.sublistView(data));
     if (!mounted || generation != _generation) {
@@ -580,10 +500,6 @@ class _AnimatedGifState extends State<AnimatedGif> {
     }
     _codec = codec;
     _frameCount = codec.frameCount;
-    _animationLog(
-      'codec loaded; asset=${widget.asset}; generation=$generation; '
-      'frameCount=$_frameCount; repetitionCount=${codec.repetitionCount}',
-    );
     await _showNextFrame(generation);
   }
 
@@ -591,10 +507,6 @@ class _AnimatedGifState extends State<AnimatedGif> {
     final codec = _codec;
     if (codec == null || !mounted || generation != _generation) return;
     if (!widget.loop && _frame >= _frameCount) {
-      _animationLog(
-        'codec completed; asset=${widget.asset}; generation=$generation; '
-        'frame=$_frame; frameCount=$_frameCount',
-      );
       widget.onCompleted();
       return;
     }
@@ -609,20 +521,11 @@ class _AnimatedGifState extends State<AnimatedGif> {
       WidgetsBinding.instance.addPostFrameCallback((_) => oldImage.dispose());
     }
     _frame++;
-    if (_frame == 1 || _frame == _frameCount) {
-      _animationLog(
-        'frame shown; asset=${widget.asset}; generation=$generation; '
-        'frame=$_frame/$_frameCount; delayMs=${frame.duration.inMilliseconds}',
-      );
-    }
     _timer = Timer(frame.duration, () => _showNextFrame(generation));
   }
 
   @override
   void dispose() {
-    _animationLog(
-      'AnimatedGif dispose; asset=${widget.asset}; frame=$_frame/$_frameCount',
-    );
     _timer?.cancel();
     _image?.dispose();
     _codec?.dispose();
