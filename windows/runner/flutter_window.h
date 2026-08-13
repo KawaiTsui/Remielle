@@ -12,7 +12,8 @@
 class FlutterWindow : public Win32Window {
  public:
   // Creates a new FlutterWindow hosting a Flutter view running |project|.
-  explicit FlutterWindow(const flutter::DartProject& project);
+  FlutterWindow(const flutter::DartProject& project, bool disable_accessibility,
+                bool constrain_to_work_area);
   virtual ~FlutterWindow();
 
  protected:
@@ -23,8 +24,15 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  static LRESULT CALLBACK FlutterViewSubclassProc(
+      HWND window, UINT message, WPARAM wparam, LPARAM lparam,
+      UINT_PTR subclass_id, DWORD_PTR reference_data);
+
   // The project to run.
   flutter::DartProject project_;
+  bool disable_accessibility_ = false;
+  bool constrain_to_work_area_ = false;
+  HWND flutter_view_window_ = nullptr;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;

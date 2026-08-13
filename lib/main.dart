@@ -1,14 +1,20 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:math';
+import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:screen_retriever/screen_retriever.dart';
+import 'package:flutter/services.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 Future<void> main(List<String> args) async {
+  final isControlPanel = args.contains('--control-panel');
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
-  if (args.contains('--control-panel')) {
+
+  if (isControlPanel) {
     const options = WindowOptions(
       size: Size(960, 720),
       minimumSize: Size(720, 520),
@@ -26,8 +32,9 @@ Future<void> main(List<String> args) async {
   }
 
   const options = WindowOptions(
-    size: Size(320, 340),
-    minimumSize: Size(180, 190),
+    size: Size(303, 298),
+    minimumSize: Size(303, 298),
+    maximumSize: Size(303, 298),
     center: true,
     backgroundColor: Colors.transparent,
     skipTaskbar: true,
@@ -37,6 +44,7 @@ Future<void> main(List<String> args) async {
   await windowManager.waitUntilReadyToShow(options, () async {
     await windowManager.setAsFrameless();
     await windowManager.setBackgroundColor(Colors.transparent);
+    await windowManager.setResizable(false);
     await windowManager.show();
     await windowManager.focus();
   });
@@ -62,6 +70,74 @@ ThemeData _theme() => ThemeData(
 
 enum PetMode { normal, idle, inactive }
 
+enum _PetAnimation {
+  normal,
+  normalEnd,
+  tap,
+  longPress,
+  busy,
+  busyEnd,
+  todoDone,
+}
+
+const _animationSizes = <String, Size>{
+  'assets/animations/a.gif': Size(257, 278),
+  'assets/animations/a_win.gif': Size(257, 290),
+  'assets/animations/b.gif': Size(258, 285),
+  'assets/animations/c.gif': Size(273, 280),
+  'assets/animations/d.gif': Size(295, 279),
+  'assets/animations/d_win.gif': Size(303, 298),
+  'assets/animations/e.gif': Size(258, 289),
+};
+
+const _animationDurations = <String, Duration>{
+  'assets/animations/a_win.gif': Duration(milliseconds: 5320),
+  'assets/animations/b.gif': Duration(milliseconds: 5400),
+  'assets/animations/c.gif': Duration(milliseconds: 2040),
+  'assets/animations/d_win.gif': Duration(milliseconds: 1120),
+  'assets/animations/e.gif': Duration(milliseconds: 5400),
+};
+
+File get _animationLogFile {
+  final localAppData = Platform.environment['LOCALAPPDATA'];
+  final base = localAppData == null || localAppData.isEmpty
+      ? Directory.systemTemp.path
+      : localAppData;
+  return File('$base\\Remielle\\logs\\animation.log');
+}
+
+void _animationLog(String message) {
+  if (Platform.environment.containsKey('FLUTTER_TEST')) return;
+  try {
+    final file = _animationLogFile;
+    file.parent.createSync(recursive: true);
+    file.writeAsStringSync(
+      '${DateTime.now().toIso8601String()} [pid=$pid] $message\r\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  } catch (_) {}
+}
+
+File get _petEventFile {
+  final localAppData = Platform.environment['LOCALAPPDATA'];
+  final base = localAppData == null || localAppData.isEmpty
+      ? Directory.systemTemp.path
+      : localAppData;
+  return File('$base\\Remielle\\pet_events.log');
+}
+
+Future<void> _sendPetEvent(String event) async {
+  if (Platform.environment.containsKey('FLUTTER_TEST')) return;
+  final file = _petEventFile;
+  await file.parent.create(recursive: true);
+  await file.writeAsString(
+    '${DateTime.now().microsecondsSinceEpoch}:$event\n',
+    mode: FileMode.append,
+    flush: true,
+  );
+}
+
 class PetHome extends StatefulWidget {
   const PetHome({super.key});
 
@@ -70,17 +146,30 @@ class PetHome extends StatefulWidget {
 }
 
 class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
-  final PetMode _mode = PetMode.normal;
+  _PetAnimation _animation = _PetAnimation.normal;
   bool _mouseThrough = false;
   bool _alwaysOnTop = true;
-  bool _clamping = false;
+  Timer? _randomNormalTimer;
+  Timer? _eventPoller;
+  Timer? _longPressTimer;
+  Timer? _animationCompletionTimer;
+  int _consumedEventCount = 0;
+  int _animationRevision = 0;
+  final _random = Random();
+  Offset? _pointerDownPosition;
+  bool _pointerDragging = false;
+  bool _longPressTriggered = false;
+  bool _windowDragging = false;
 
   @override
   void initState() {
     super.initState();
+    _animationLog('PetHome init; animation=$_animation asset=$_animationAsset');
     windowManager.addListener(this);
     trayManager.addListener(this);
     _initialize();
+    _initializeEvents();
+    _scheduleRandomNormalEnd();
   }
 
   Future<void> _initialize() async {
@@ -107,6 +196,11 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   @override
   void dispose() {
+    _animationLog('PetHome dispose; animation=$_animation');
+    _randomNormalTimer?.cancel();
+    _eventPoller?.cancel();
+    _longPressTimer?.cancel();
+    _animationCompletionTimer?.cancel();
     windowManager.removeListener(this);
     trayManager.removeListener(this);
     super.dispose();
@@ -153,34 +247,217 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   @override
   Future<void> onWindowClose() => windowManager.hide();
 
-  @override
-  Future<void> onWindowMove() async {
-    if (_clamping) return;
-    final display = await screenRetriever.getPrimaryDisplay();
-    final position = await windowManager.getPosition();
-    final size = await windowManager.getSize();
-    final origin = display.visiblePosition ?? Offset.zero;
-    final area = display.visibleSize ?? display.size;
-    final bounded = Offset(
-      position.dx
-          .clamp(origin.dx, origin.dx + area.width - size.width)
-          .toDouble(),
-      position.dy
-          .clamp(origin.dy, origin.dy + area.height - size.height)
-          .toDouble(),
+  String get _animationAsset => switch (_animation) {
+    _PetAnimation.normal => 'assets/animations/a.gif',
+    _PetAnimation.normalEnd => 'assets/animations/a_win.gif',
+    _PetAnimation.tap => 'assets/animations/b.gif',
+    _PetAnimation.longPress => 'assets/animations/e.gif',
+    _PetAnimation.busy => 'assets/animations/d.gif',
+    _PetAnimation.busyEnd => 'assets/animations/d_win.gif',
+    _PetAnimation.todoDone => 'assets/animations/c.gif',
+  };
+
+  Size get _assetSize => _animationSizes[_animationAsset]!;
+
+  Future<void> _initializeEvents() async {
+    final file = _petEventFile;
+    if (await file.exists()) {
+      _consumedEventCount = (await file.readAsLines()).length;
+    }
+    _eventPoller = Timer.periodic(
+      const Duration(milliseconds: 200),
+      (_) => _readPetEvents(),
     );
-    if (bounded != position) {
-      _clamping = true;
-      await windowManager.setPosition(bounded);
-      _clamping = false;
+  }
+
+  void _scheduleRandomNormalEnd() {
+    _randomNormalTimer?.cancel();
+    final delay = Duration(seconds: 20 + _random.nextInt(21));
+    _randomNormalTimer = Timer(delay, () {
+      if (!mounted) return;
+      if (_animation == _PetAnimation.normal) {
+        _playAnimation(_PetAnimation.normalEnd);
+      } else {
+        _scheduleRandomNormalEnd();
+      }
+    });
+  }
+
+  Future<void> _readPetEvents() async {
+    final file = _petEventFile;
+    if (!await file.exists()) return;
+    final lines = await file.readAsLines();
+    if (_consumedEventCount > lines.length) _consumedEventCount = 0;
+    for (final line in lines.skip(_consumedEventCount)) {
+      final separator = line.indexOf(':');
+      if (separator >= 0) _handlePetEvent(line.substring(separator + 1));
+    }
+    _consumedEventCount = lines.length;
+  }
+
+  void _handlePetEvent(String event) {
+    if (!mounted) return;
+    final next = switch (event) {
+      'inputFocus' => _PetAnimation.busy,
+      'inputEnd' => _PetAnimation.busyEnd,
+      'todoDone' => _PetAnimation.todoDone,
+      _ => null,
+    };
+    if (next != null && next != _animation) {
+      _playAnimation(next);
     }
   }
 
-  String get _asset => switch (_mode) {
-    PetMode.normal => 'assets/animations/a.gif',
-    PetMode.idle => 'assets/animations/b.gif',
-    PetMode.inactive => 'assets/animations/e.gif',
-  };
+  void _playAnimation(_PetAnimation animation) {
+    final previous = _animation;
+    _randomNormalTimer?.cancel();
+    _animationCompletionTimer?.cancel();
+    setState(() {
+      _animation = animation;
+      _animationRevision++;
+    });
+    _animationLog(
+      'playAnimation $previous -> $animation; asset=$_animationAsset; '
+      'revision=$_animationRevision; windowDragging=$_windowDragging',
+    );
+    if (animation != _PetAnimation.normal &&
+        animation != _PetAnimation.busy &&
+        !_windowDragging) {
+      final duration = _animationDurations[_animationAsset];
+      if (duration != null) {
+        _animationLog(
+          'schedule fallback; animation=$animation; '
+          'delayMs=${duration.inMilliseconds + 100}',
+        );
+        _animationCompletionTimer = Timer(
+          duration + const Duration(milliseconds: 100),
+          () => _onAnimationCompleted('fallback-timer-fired'),
+        );
+      }
+    }
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    _animationLog(
+      'pointerDown; buttons=${event.buttons}; position=${event.position}; '
+      'animation=$_animation; windowDragging=$_windowDragging',
+    );
+    if (event.buttons != kPrimaryMouseButton) return;
+    _pointerDownPosition = event.position;
+    _pointerDragging = false;
+    _longPressTriggered = false;
+    _longPressTimer?.cancel();
+    _longPressTimer = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted || _pointerDownPosition == null || _pointerDragging) return;
+      _longPressTriggered = true;
+      _animationLog('longPress timer fired; animation=$_animation');
+      _playAnimation(_PetAnimation.longPress);
+    });
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    final origin = _pointerDownPosition;
+    if (origin == null || _pointerDragging) return;
+    if ((event.position - origin).distance < 10) return;
+    _animationLog(
+      'drag threshold crossed; distance=${(event.position - origin).distance}',
+    );
+    _pointerDragging = true;
+    _longPressTimer?.cancel();
+    _startWindowDrag();
+  }
+
+  Future<void> _startWindowDrag() async {
+    _windowDragging = true;
+    _animationLog('startWindowDrag entered; animation=$_animation');
+    if (_animation != _PetAnimation.longPress) {
+      _playAnimation(_PetAnimation.longPress);
+    } else {
+      setState(() {});
+    }
+    await WidgetsBinding.instance.endOfFrame;
+    _animationLog(
+      'startWindowDrag after frame; mounted=$mounted; '
+      'windowDragging=$_windowDragging; animation=$_animation',
+    );
+    if (!mounted || !_windowDragging) return;
+    try {
+      await windowManager.startDragging();
+      _animationLog('native startDragging returned; animation=$_animation');
+      _finishWindowDrag('native-startDragging-returned');
+    } on MissingPluginException {
+      // Widget tests do not load the native window manager plugin.
+    }
+  }
+
+  void _onPointerUp(PointerUpEvent event) {
+    _animationLog(
+      'pointerUp; pointerDragging=$_pointerDragging; '
+      'longPressTriggered=$_longPressTriggered; windowDragging=$_windowDragging; '
+      'animation=$_animation',
+    );
+    _longPressTimer?.cancel();
+    if (_pointerDownPosition != null &&
+        !_pointerDragging &&
+        !_longPressTriggered) {
+      _playAnimation(_PetAnimation.tap);
+    }
+    _resetPointerGesture();
+  }
+
+  void _onPointerCancel(PointerCancelEvent event) {
+    _animationLog(
+      'pointerCancel; windowDragging=$_windowDragging; animation=$_animation',
+    );
+    _longPressTimer?.cancel();
+    _resetPointerGesture();
+  }
+
+  void _resetPointerGesture() {
+    _pointerDownPosition = null;
+    _pointerDragging = false;
+    _longPressTriggered = false;
+  }
+
+  @override
+  void onWindowMoved() {
+    _animationLog(
+      'onWindowMoved; mounted=$mounted; windowDragging=$_windowDragging; '
+      'animation=$_animation',
+    );
+    _finishWindowDrag('onWindowMoved');
+  }
+
+  void _finishWindowDrag(String source) {
+    if (!_windowDragging || !mounted) {
+      _animationLog(
+        'finishWindowDrag ignored; source=$source; mounted=$mounted; '
+        'windowDragging=$_windowDragging',
+      );
+      return;
+    }
+    _animationLog('finishWindowDrag; source=$source; animation=$_animation');
+    _windowDragging = false;
+    _playAnimation(_PetAnimation.normal);
+    _scheduleRandomNormalEnd();
+  }
+
+  void _onAnimationCompleted(String source) {
+    _animationLog(
+      'animationCompleted source=$source; mounted=$mounted; '
+      'animation=$_animation; asset=$_animationAsset; '
+      'windowDragging=$_windowDragging',
+    );
+    if (!mounted) return;
+    if (_animation == _PetAnimation.normal || _windowDragging) {
+      _animationLog('animationCompleted ignored; source=$source');
+      return;
+    }
+    _animationCompletionTimer?.cancel();
+    _animationCompletionTimer = null;
+    _playAnimation(_PetAnimation.normal);
+    _scheduleRandomNormalEnd();
+  }
 
   Process? _panelProcess;
 
@@ -196,23 +473,175 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    backgroundColor: Colors.transparent,
-    body: GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onSecondaryTap: trayManager.popUpContextMenu,
-      onPanStart: (_) => windowManager.startDragging(),
-      child: Center(
-        child: FittedBox(
-          fit: BoxFit.contain,
-          child: Image.asset(
-            _asset,
-            filterQuality: FilterQuality.high,
-            gaplessPlayback: true,
+  Widget build(BuildContext context) {
+    final assetSize = _assetSize;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onSecondaryTap: trayManager.popUpContextMenu,
+        child: Listener(
+          key: const ValueKey('pet-pointer-listener'),
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: _onPointerDown,
+          onPointerMove: _onPointerMove,
+          onPointerUp: _onPointerUp,
+          onPointerCancel: _onPointerCancel,
+          child: Center(
+            child: SizedBox.fromSize(
+              size: assetSize,
+              child: AnimatedGif(
+                asset: _animationAsset,
+                revision: _animationRevision,
+                width: assetSize.width,
+                height: assetSize.height,
+                loop:
+                    _animation == _PetAnimation.normal ||
+                    _animation == _PetAnimation.busy ||
+                    _windowDragging,
+                onCompleted: () => _onAnimationCompleted('player-completed'),
+              ),
+            ),
           ),
         ),
       ),
-    ),
+    );
+  }
+}
+
+class AnimatedGif extends StatefulWidget {
+  const AnimatedGif({
+    required this.asset,
+    required this.revision,
+    required this.width,
+    required this.height,
+    required this.loop,
+    required this.onCompleted,
+    super.key,
+  });
+
+  final String asset;
+  final int revision;
+  final double width;
+  final double height;
+  final bool loop;
+  final VoidCallback onCompleted;
+
+  @override
+  State<AnimatedGif> createState() => _AnimatedGifState();
+}
+
+class _AnimatedGifState extends State<AnimatedGif> {
+  ui.Codec? _codec;
+  ui.Image? _image;
+  Timer? _timer;
+  int _frame = 0;
+  int _frameCount = 0;
+  int _generation = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _animationLog(
+      'AnimatedGif init; asset=${widget.asset}; revision=${widget.revision}; '
+      'loop=${widget.loop}',
+    );
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant AnimatedGif oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.asset != widget.asset ||
+        oldWidget.revision != widget.revision) {
+      _animationLog(
+        'AnimatedGif update; ${oldWidget.asset}:${oldWidget.revision} -> '
+        '${widget.asset}:${widget.revision}; loop=${widget.loop}',
+      );
+      _generation++;
+      _timer?.cancel();
+      _codec?.dispose();
+      _codec = null;
+      _frame = 0;
+      _load();
+    }
+  }
+
+  Future<void> _load() async {
+    final generation = _generation;
+    _animationLog(
+      'codec load start; asset=${widget.asset}; generation=$generation',
+    );
+    final data = await rootBundle.load(widget.asset);
+    final codec = await ui.instantiateImageCodec(Uint8List.sublistView(data));
+    if (!mounted || generation != _generation) {
+      codec.dispose();
+      return;
+    }
+    _codec = codec;
+    _frameCount = codec.frameCount;
+    _animationLog(
+      'codec loaded; asset=${widget.asset}; generation=$generation; '
+      'frameCount=$_frameCount; repetitionCount=${codec.repetitionCount}',
+    );
+    await _showNextFrame(generation);
+  }
+
+  Future<void> _showNextFrame(int generation) async {
+    final codec = _codec;
+    if (codec == null || !mounted || generation != _generation) return;
+    if (!widget.loop && _frame >= _frameCount) {
+      _animationLog(
+        'codec completed; asset=${widget.asset}; generation=$generation; '
+        'frame=$_frame; frameCount=$_frameCount',
+      );
+      widget.onCompleted();
+      return;
+    }
+    final frame = await codec.getNextFrame();
+    if (!mounted || generation != _generation) {
+      frame.image.dispose();
+      return;
+    }
+    final oldImage = _image;
+    setState(() => _image = frame.image);
+    if (oldImage != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => oldImage.dispose());
+    }
+    _frame++;
+    if (_frame == 1 || _frame == _frameCount) {
+      _animationLog(
+        'frame shown; asset=${widget.asset}; generation=$generation; '
+        'frame=$_frame/$_frameCount; delayMs=${frame.duration.inMilliseconds}',
+      );
+    }
+    _timer = Timer(frame.duration, () => _showNextFrame(generation));
+  }
+
+  @override
+  void dispose() {
+    _animationLog(
+      'AnimatedGif dispose; asset=${widget.asset}; frame=$_frame/$_frameCount',
+    );
+    _timer?.cancel();
+    _image?.dispose();
+    _codec?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: widget.width,
+    height: widget.height,
+    child: _image == null
+        ? const SizedBox.shrink()
+        : RawImage(
+            image: _image,
+            width: widget.width,
+            height: widget.height,
+            fit: BoxFit.none,
+            filterQuality: FilterQuality.none,
+          ),
   );
 }
 
@@ -220,11 +649,13 @@ class ControlPanelApp extends StatelessWidget {
   const ControlPanelApp({super.key});
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    debugShowCheckedModeBanner: false,
-    title: 'Remielle 控制面板',
-    theme: _theme(),
-    home: const ControlPanelPage(),
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Remielle 控制面板',
+      theme: _theme(),
+      home: const ControlPanelPage(),
+    ),
   );
 }
 
@@ -237,32 +668,61 @@ class ControlPanelPage extends StatefulWidget {
 
 class _ControlPanelPageState extends State<ControlPanelPage> {
   final _todoController = TextEditingController();
+  final _todoFocusNode = FocusNode();
   final _todos = <TodoEntry>[TodoEntry(id: 1, title: '整理 Remielle 动画素材')];
   int _nextTodoId = 2;
   PetMode _mode = PetMode.normal;
   int _idleMinutes = 5;
   bool _alwaysOnTop = true;
   bool _mouseThrough = false;
+  bool _inputSessionActive = false;
 
   @override
   void initState() {
     super.initState();
+    _todoFocusNode.addListener(_onTodoFocusChanged);
   }
 
   @override
   void dispose() {
+    _todoFocusNode.removeListener(_onTodoFocusChanged);
+    _todoFocusNode.dispose();
     _todoController.dispose();
     super.dispose();
   }
 
+  void _onTodoFocusChanged() {
+    if (_todoFocusNode.hasFocus) {
+      _inputSessionActive = true;
+      _sendPetEvent('inputFocus');
+    }
+  }
+
+  void _endInputSession() {
+    if (!_inputSessionActive) return;
+    _inputSessionActive = false;
+    _sendPetEvent('inputEnd');
+  }
+
   void _addTodo() {
     final value = _todoController.text.trim();
-    if (value.isEmpty) return;
+    if (value.isEmpty) {
+      _endInputSession();
+      return;
+    }
     setState(() {
       _todos.add(TodoEntry(id: _nextTodoId++, title: value));
       _todoController.clear();
     });
+    _endInputSession();
     FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  Future<void> _completeTodo(TodoEntry todo) async {
+    setState(() {
+      _todos.removeWhere((item) => item.id == todo.id);
+    });
+    await _sendPetEvent('todoDone');
   }
 
   @override
@@ -283,6 +743,7 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
                   Expanded(
                     child: TextField(
                       controller: _todoController,
+                      focusNode: _todoFocusNode,
                       decoration: const InputDecoration(
                         hintText: '添加一个 Todo',
                         border: OutlineInputBorder(),
@@ -309,9 +770,7 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
                       key: ValueKey(todo.id),
                       value: false,
                       title: Text(todo.title),
-                      onChanged: (_) => setState(() {
-                        _todos.removeWhere((item) => item.id == todo.id);
-                      }),
+                      onChanged: (_) => _completeTodo(todo),
                       secondary: IconButton(
                         tooltip: '设置提醒',
                         icon: const Icon(Icons.notifications_none),
