@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
@@ -8,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
+
+part 'control_panel.dart';
 
 Future<void> main(List<String> args) async {
   final isControlPanel = args.contains('--control-panel');
@@ -67,8 +70,6 @@ ThemeData _theme() => ThemeData(
   colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xffe986a9)),
   useMaterial3: true,
 );
-
-enum PetMode { normal, idle, inactive }
 
 enum _PetAnimation {
   normal,
@@ -139,6 +140,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _pointerDragging = false;
   bool _longPressTriggered = false;
   bool _windowDragging = false;
+  bool _petVisible = true;
 
   @override
   void initState() {
@@ -160,6 +162,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     Menu(
       items: [
         MenuItem(key: 'panel', label: '控制面板'),
+        if (!_petVisible) MenuItem(key: 'showPet', label: '显示桌宠'),
         MenuItem.checkbox(
           key: 'through',
           label: '鼠标穿透',
@@ -167,7 +170,10 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
         ),
         MenuItem.checkbox(key: 'top', label: '置顶', checked: _alwaysOnTop),
         MenuItem.separator(),
-        MenuItem(key: 'exit', label: '退出'),
+        MenuItem(
+          key: _petVisible ? 'exitPet' : 'exitTray',
+          label: _petVisible ? '退出桌宠' : '退出托盘',
+        ),
       ],
     ),
   );
@@ -198,8 +204,12 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
         _setMouseThrough(!_mouseThrough);
       case 'top':
         _setAlwaysOnTop(!_alwaysOnTop);
-      case 'exit':
-        _exitApp();
+      case 'showPet':
+        _showPet();
+      case 'exitPet':
+        _exitPet();
+      case 'exitTray':
+        _exitApplication();
     }
   }
 
@@ -215,14 +225,36 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     await _refreshMenu();
   }
 
-  Future<void> _exitApp() async {
+  Future<void> _showPet() async {
+    _petVisible = true;
+    await windowManager.show();
+    await windowManager.focus();
+    await _refreshMenu();
+  }
+
+  Future<void> _hidePet() async {
+    _petVisible = false;
+    await windowManager.hide();
+    await _refreshMenu();
+  }
+
+  Future<void> _exitPet() async {
+    final settings = await _PanelDataStore.load();
+    if (settings.exitTrayOnPetExit) {
+      await _exitApplication();
+      return;
+    }
+    await _hidePet();
+  }
+
+  Future<void> _exitApplication() async {
     _panelProcess?.kill();
     await trayManager.destroy();
     exit(0);
   }
 
   @override
-  Future<void> onWindowClose() => windowManager.hide();
+  Future<void> onWindowClose() => _hidePet();
 
   String get _animationAsset => switch (_animation) {
     _PetAnimation.normal => 'assets/animations/a.gif',
@@ -546,207 +578,4 @@ class _AnimatedGifState extends State<AnimatedGif> {
             filterQuality: FilterQuality.none,
           ),
   );
-}
-
-class ControlPanelApp extends StatelessWidget {
-  const ControlPanelApp({super.key});
-
-  @override
-  Widget build(BuildContext context) => ExcludeSemantics(
-    child: MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Remielle 控制面板',
-      theme: _theme(),
-      home: const ControlPanelPage(),
-    ),
-  );
-}
-
-class ControlPanelPage extends StatefulWidget {
-  const ControlPanelPage({super.key});
-
-  @override
-  State<ControlPanelPage> createState() => _ControlPanelPageState();
-}
-
-class _ControlPanelPageState extends State<ControlPanelPage> {
-  final _todoController = TextEditingController();
-  final _todoFocusNode = FocusNode();
-  final _todos = <TodoEntry>[TodoEntry(id: 1, title: '整理 Remielle 动画素材')];
-  int _nextTodoId = 2;
-  PetMode _mode = PetMode.normal;
-  int _idleMinutes = 5;
-  bool _alwaysOnTop = true;
-  bool _mouseThrough = false;
-  bool _inputSessionActive = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _todoFocusNode.addListener(_onTodoFocusChanged);
-  }
-
-  @override
-  void dispose() {
-    _todoFocusNode.removeListener(_onTodoFocusChanged);
-    _todoFocusNode.dispose();
-    _todoController.dispose();
-    super.dispose();
-  }
-
-  void _onTodoFocusChanged() {
-    if (_todoFocusNode.hasFocus) {
-      _inputSessionActive = true;
-      _sendPetEvent('inputFocus');
-    }
-  }
-
-  void _endInputSession() {
-    if (!_inputSessionActive) return;
-    _inputSessionActive = false;
-    _sendPetEvent('inputEnd');
-  }
-
-  void _addTodo() {
-    final value = _todoController.text.trim();
-    if (value.isEmpty) {
-      _endInputSession();
-      return;
-    }
-    setState(() {
-      _todos.add(TodoEntry(id: _nextTodoId++, title: value));
-      _todoController.clear();
-    });
-    _endInputSession();
-    FocusManager.instance.primaryFocus?.unfocus();
-  }
-
-  Future<void> _completeTodo(TodoEntry todo) async {
-    setState(() {
-      _todos.removeWhere((item) => item.id == todo.id);
-    });
-    await _sendPetEvent('todoDone');
-  }
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Remielle 控制面板')),
-    body: SingleChildScrollView(
-      padding: const EdgeInsets.all(32),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 980),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Todo', style: Theme.of(context).textTheme.headlineSmall),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _todoController,
-                      focusNode: _todoFocusNode,
-                      decoration: const InputDecoration(
-                        hintText: '添加一个 Todo',
-                        border: OutlineInputBorder(),
-                      ),
-                      onSubmitted: (_) => _addTodo(),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  IconButton.filled(
-                    tooltip: '添加 Todo',
-                    onPressed: _addTodo,
-                    icon: const Icon(Icons.add),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: (_todos.length * 56.0).clamp(56.0, 280.0),
-                child: ListView.builder(
-                  itemCount: _todos.length,
-                  itemBuilder: (context, index) {
-                    final todo = _todos[index];
-                    return CheckboxListTile(
-                      key: ValueKey(todo.id),
-                      value: false,
-                      title: Text(todo.title),
-                      onChanged: (_) => _completeTodo(todo),
-                      secondary: IconButton(
-                        tooltip: '设置提醒',
-                        icon: const Icon(Icons.notifications_none),
-                        onPressed: () {},
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const Divider(height: 40),
-              Text('宠物设置', style: Theme.of(context).textTheme.headlineSmall),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<PetMode>(
-                initialValue: _mode,
-                decoration: const InputDecoration(
-                  labelText: '预览状态',
-                  border: OutlineInputBorder(),
-                ),
-                items: const [
-                  DropdownMenuItem(value: PetMode.normal, child: Text('常态')),
-                  DropdownMenuItem(value: PetMode.idle, child: Text('待机')),
-                  DropdownMenuItem(
-                    value: PetMode.inactive,
-                    child: Text('长时间无活动'),
-                  ),
-                ],
-                onChanged: (value) => setState(() => _mode = value ?? _mode),
-              ),
-              const SizedBox(height: 18),
-              Text('待机阈值：$_idleMinutes 分钟'),
-              Slider(
-                value: _idleMinutes.toDouble(),
-                min: 1,
-                max: 30,
-                divisions: 29,
-                label: '$_idleMinutes 分钟',
-                onChanged: (value) =>
-                    setState(() => _idleMinutes = value.round()),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('始终置顶'),
-                value: _alwaysOnTop,
-                onChanged: (value) {
-                  setState(() => _alwaysOnTop = value);
-                },
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('鼠标穿透'),
-                subtitle: const Text('开启后可从任务栏托盘菜单关闭穿透'),
-                value: _mouseThrough,
-                onChanged: (value) {
-                  setState(() => _mouseThrough = value);
-                },
-              ),
-              const SizedBox(height: 20),
-              FilledButton.tonalIcon(
-                onPressed: () => exit(0),
-                icon: const Icon(Icons.exit_to_app),
-                label: const Text('关闭控制面板'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
-class TodoEntry {
-  const TodoEntry({required this.id, required this.title});
-
-  final int id;
-  final String title;
 }
