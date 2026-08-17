@@ -3,6 +3,9 @@
 
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
+#include <flutter/method_channel.h>
+#include <flutter/standard_method_codec.h>
+#include <UIAutomation.h>
 
 #include <memory>
 
@@ -24,6 +27,8 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  bool IsTextCaretActive() const;
+
   static LRESULT CALLBACK FlutterViewSubclassProc(
       HWND window, UINT message, WPARAM wparam, LPARAM lparam,
       UINT_PTR subclass_id, DWORD_PTR reference_data);
@@ -33,9 +38,13 @@ class FlutterWindow : public Win32Window {
   bool disable_accessibility_ = false;
   bool constrain_to_work_area_ = false;
   HWND flutter_view_window_ = nullptr;
+  HHOOK keyboard_hook_ = nullptr;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      system_channel_;
+  IUIAutomation* ui_automation_ = nullptr;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

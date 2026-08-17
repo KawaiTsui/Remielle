@@ -1,7 +1,27 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:remielle/main.dart';
+
+Finder _petAnimationFinder(String asset) => find.byWidgetPredicate(
+  (widget) => widget is AnimatedGif && widget.asset == asset,
+);
+
+AnimatedGif _petAnimation(WidgetTester tester, String asset) =>
+    tester.widget<AnimatedGif>(_petAnimationFinder(asset));
+
+Transform _petAnimationPosition(WidgetTester tester, String asset) =>
+    tester.widget<Transform>(
+      find.ancestor(
+        of: _petAnimationFinder(asset),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Transform &&
+              widget.key == const ValueKey('pet-animation-position'),
+        ),
+      ),
+    );
 
 void main() {
   testWidgets('宠物主页显示动画资源', (tester) async {
@@ -22,7 +42,7 @@ void main() {
 
     await tester.tap(find.byType(GestureDetector));
     await tester.pump();
-    var animation = tester.widget<AnimatedGif>(find.byType(AnimatedGif));
+    var animation = _petAnimation(tester, 'assets/animations/b.gif');
     expect(animation.asset, 'assets/animations/b.gif');
     expect(animation.loop, isFalse);
 
@@ -33,13 +53,13 @@ void main() {
     await gesture.moveBy(const Offset(5, 0));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump();
-    animation = tester.widget<AnimatedGif>(find.byType(AnimatedGif));
+    animation = _petAnimation(tester, 'assets/animations/e.gif');
     expect(animation.asset, 'assets/animations/e.gif');
     expect(animation.loop, isFalse);
 
     await gesture.moveBy(const Offset(10, 0));
     await tester.pump();
-    animation = tester.widget<AnimatedGif>(find.byType(AnimatedGif));
+    animation = _petAnimation(tester, 'assets/animations/e.gif');
     expect(animation.asset, 'assets/animations/e.gif');
     expect(animation.loop, isTrue);
     await gesture.up();
@@ -52,27 +72,123 @@ void main() {
     await tester.tap(listener);
     await tester.pump();
     expect(
-      tester.widget<AnimatedGif>(find.byType(AnimatedGif)).asset,
+      _petAnimation(tester, 'assets/animations/b.gif').asset,
       'assets/animations/b.gif',
     );
     await tester.pump(const Duration(milliseconds: 5600));
     expect(
-      tester.widget<AnimatedGif>(find.byType(AnimatedGif)).asset,
+      _petAnimation(tester, 'assets/animations/a.gif').asset,
       'assets/animations/a.gif',
     );
 
     final gesture = await tester.startGesture(tester.getCenter(listener));
     await tester.pump(const Duration(milliseconds: 300));
     expect(
-      tester.widget<AnimatedGif>(find.byType(AnimatedGif)).asset,
+      _petAnimation(tester, 'assets/animations/e.gif').asset,
       'assets/animations/e.gif',
     );
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 5600));
     expect(
-      tester.widget<AnimatedGif>(find.byType(AnimatedGif)).asset,
+      _petAnimation(tester, 'assets/animations/a.gif').asset,
       'assets/animations/a.gif',
     );
+  });
+
+  testWidgets('系统文本光标激活和结束时播放忙碌动画', (tester) async {
+    var caretActive = false;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('remielle/system'),
+      (call) async {
+        if (call.method == 'isTextCaretActive') return caretActive;
+        if (call.method == 'getKeyboardInputIdleMilliseconds') return 0;
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('remielle/system'),
+        null,
+      ),
+    );
+
+    await tester.pumpWidget(const RemielleApp());
+    await tester.pump();
+    caretActive = true;
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+    var position = _petAnimationPosition(tester, 'assets/animations/d.gif');
+    expect(position.transform.getTranslation().x, -14);
+    expect(position.transform.getTranslation().y, 0);
+
+    caretActive = false;
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
+    position = _petAnimationPosition(tester, 'assets/animations/d_win.gif');
+    expect(position.transform.getTranslation().x, -21);
+    expect(position.transform.getTranslation().y, -7);
+
+    await tester.pump(const Duration(milliseconds: 1300));
+    expect(
+      _petAnimation(tester, 'assets/animations/a.gif').asset,
+      'assets/animations/a.gif',
+    );
+    position = _petAnimationPosition(tester, 'assets/animations/a.gif');
+    expect(position.transform.getTranslation().x, 0);
+    expect(position.transform.getTranslation().y, 0);
+  });
+
+  testWidgets('光标激活但系统空闲 30 秒后回到待机', (tester) async {
+    var caretActive = true;
+    var keyboardIdleMilliseconds = 0;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('remielle/system'),
+      (call) async {
+        if (call.method == 'isTextCaretActive') return caretActive;
+        if (call.method == 'getKeyboardInputIdleMilliseconds') {
+          return keyboardIdleMilliseconds;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('remielle/system'),
+        null,
+      ),
+    );
+
+    await tester.pumpWidget(const RemielleApp());
+    await tester.pump();
+    keyboardIdleMilliseconds = 30 * 1000;
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
+
+    await tester.pump(const Duration(milliseconds: 1300));
+    expect(
+      _petAnimation(tester, 'assets/animations/a.gif').asset,
+      'assets/animations/a.gif',
+    );
+
+    keyboardIdleMilliseconds = 0;
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+    caretActive = false;
   });
 
   testWidgets('控制面板可以添加 Todo', (tester) async {
@@ -100,6 +216,63 @@ void main() {
     await tester.pump();
 
     expect(find.text('点击空白处添加'), findsOneWidget);
+  });
+
+  testWidgets('完成 Todo 后自动归档并可恢复到今日待办', (tester) async {
+    await tester.pumpWidget(const ControlPanelApp());
+    await tester.pump();
+
+    expect(find.text('今日待办'), findsOneWidget);
+    expect(find.text('当天加入'), findsOneWidget);
+    expect(find.text('已完成'), findsOneWidget);
+    expect(find.text('完成的 Todo 会自动归档到这里'), findsOneWidget);
+
+    await tester.enterText(find.byKey(const ValueKey('todo-input')), '归档任务');
+    await tester.tap(find.byKey(const ValueKey('add-todo-button')));
+    await tester.pump();
+
+    var checkbox = tester.widget<Checkbox>(
+      find.byKey(const ValueKey('todo-checkbox-1')),
+    );
+    expect(checkbox.value, isFalse);
+
+    await tester.tap(find.byKey(const ValueKey('todo-checkbox-1')));
+    await tester.pump();
+
+    checkbox = tester.widget<Checkbox>(
+      find.byKey(const ValueKey('todo-checkbox-1')),
+    );
+    expect(checkbox.value, isTrue);
+    final archivedTitle = tester.widget<Text>(find.text('归档任务'));
+    expect(archivedTitle.style?.decoration, TextDecoration.lineThrough);
+
+    await tester.tap(find.byKey(const ValueKey('todo-checkbox-1')));
+    await tester.pump();
+
+    checkbox = tester.widget<Checkbox>(
+      find.byKey(const ValueKey('todo-checkbox-1')),
+    );
+    expect(checkbox.value, isFalse);
+  });
+
+  test('Todo 时间和完成状态可以序列化，并兼容旧数据', () {
+    final createdAt = DateTime(2026, 8, 17, 9, 30);
+    final completedAt = DateTime(2026, 8, 17, 10, 15);
+    final restored = TodoEntry.fromJson(
+      TodoEntry(
+        id: 7,
+        title: '持久化任务',
+        createdAt: createdAt,
+        completedAt: completedAt,
+      ).toJson(),
+    );
+
+    expect(restored.createdAt, createdAt);
+    expect(restored.completedAt, completedAt);
+
+    final legacy = TodoEntry.fromJson({'id': 8, 'title': '旧任务'});
+    expect(legacy.completedAt, isNull);
+    expect(legacy.createdAt, isNotNull);
   });
 
   testWidgets('设置页使用测试阶段默认值', (tester) async {

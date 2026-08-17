@@ -99,6 +99,14 @@ const _animationDurations = <String, Duration>{
   'assets/animations/e.gif': Duration(milliseconds: 5400),
 };
 
+const _animationOffsets = <String, Offset>{
+  'assets/animations/d.gif': Offset(-14, 0),
+  'assets/animations/d_win.gif': Offset(-21, -7),
+};
+
+const _systemChannel = MethodChannel('remielle/system');
+const _caretIdleLimit = Duration(seconds: 30);
+
 File get _petEventFile {
   final localAppData = Platform.environment['LOCALAPPDATA'];
   final base = localAppData == null || localAppData.isEmpty
@@ -131,6 +139,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _alwaysOnTop = true;
   Timer? _randomNormalTimer;
   Timer? _eventPoller;
+  Timer? _caretPoller;
   Timer? _longPressTimer;
   Timer? _animationCompletionTimer;
   int _consumedEventCount = 0;
@@ -141,6 +150,11 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _longPressTriggered = false;
   bool _windowDragging = false;
   bool _petVisible = true;
+  bool _systemCaretActive = false;
+  bool _caretIdleSuppressed = false;
+  bool _checkingSystemCaret = false;
+  int _keyboardIdleBaselineMilliseconds = 0;
+  int _lastKeyboardIdleMilliseconds = 0;
 
   @override
   void initState() {
@@ -149,6 +163,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     trayManager.addListener(this);
     _initialize();
     _initializeEvents();
+    _initializeCaretMonitoring();
     _scheduleRandomNormalEnd();
   }
 
@@ -182,6 +197,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   void dispose() {
     _randomNormalTimer?.cancel();
     _eventPoller?.cancel();
+    _caretPoller?.cancel();
     _longPressTimer?.cancel();
     _animationCompletionTimer?.cancel();
     windowManager.removeListener(this);
@@ -268,6 +284,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   Size get _assetSize => _animationSizes[_animationAsset]!;
 
+  Offset get _assetOffset => _animationOffsets[_animationAsset] ?? Offset.zero;
+
   Future<void> _initializeEvents() async {
     final file = _petEventFile;
     if (await file.exists()) {
@@ -277,6 +295,70 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       const Duration(milliseconds: 200),
       (_) => _readPetEvents(),
     );
+  }
+
+  void _initializeCaretMonitoring() {
+    if (!Platform.isWindows) return;
+    _checkSystemCaret();
+    _caretPoller = Timer.periodic(
+      const Duration(milliseconds: 200),
+      (_) => _checkSystemCaret(),
+    );
+  }
+
+  Future<void> _checkSystemCaret() async {
+    if (_checkingSystemCaret || !mounted) return;
+    _checkingSystemCaret = true;
+    try {
+      final active =
+          await _systemChannel.invokeMethod<bool>('isTextCaretActive') ?? false;
+      final keyboardIdleMilliseconds = active
+          ? await _systemChannel.invokeMethod<int>(
+                  'getKeyboardInputIdleMilliseconds',
+                ) ??
+                0
+          : 0;
+      if (!mounted) return;
+      if (active) {
+        if (!_systemCaretActive) {
+          _keyboardIdleBaselineMilliseconds = keyboardIdleMilliseconds;
+        } else if (keyboardIdleMilliseconds < _lastKeyboardIdleMilliseconds) {
+          _keyboardIdleBaselineMilliseconds = 0;
+        }
+        _lastKeyboardIdleMilliseconds = keyboardIdleMilliseconds;
+        _systemCaretActive = true;
+        final idleMilliseconds = max(
+          0,
+          keyboardIdleMilliseconds - _keyboardIdleBaselineMilliseconds,
+        );
+        if (idleMilliseconds >= _caretIdleLimit.inMilliseconds) {
+          if (!_caretIdleSuppressed && !_windowDragging) {
+            _caretIdleSuppressed = true;
+            _playAnimation(_PetAnimation.busyEnd);
+          }
+        } else {
+          _caretIdleSuppressed = false;
+        }
+        if (!_caretIdleSuppressed &&
+            _animation != _PetAnimation.busy &&
+            !_windowDragging) {
+          _playAnimation(_PetAnimation.busy);
+        }
+      } else if (_systemCaretActive) {
+        _systemCaretActive = false;
+        _keyboardIdleBaselineMilliseconds = 0;
+        _lastKeyboardIdleMilliseconds = 0;
+        final wasIdleSuppressed = _caretIdleSuppressed;
+        _caretIdleSuppressed = false;
+        if (!wasIdleSuppressed) _playAnimation(_PetAnimation.busyEnd);
+      }
+    } on MissingPluginException {
+      // Widget tests do not load the native Windows runner channel.
+    } on PlatformException {
+      // A transient native query failure should not affect the desktop pet.
+    } finally {
+      _checkingSystemCaret = false;
+    }
   }
 
   void _scheduleRandomNormalEnd() {
@@ -418,6 +500,10 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     }
     _animationCompletionTimer?.cancel();
     _animationCompletionTimer = null;
+    if (_systemCaretActive && !_caretIdleSuppressed) {
+      _playAnimation(_PetAnimation.busy);
+      return;
+    }
     _playAnimation(_PetAnimation.normal);
     _scheduleRandomNormalEnd();
   }
@@ -451,18 +537,22 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
           onPointerUp: _onPointerUp,
           onPointerCancel: _onPointerCancel,
           child: Center(
-            child: SizedBox.fromSize(
-              size: assetSize,
-              child: AnimatedGif(
-                asset: _animationAsset,
-                revision: _animationRevision,
-                width: assetSize.width,
-                height: assetSize.height,
-                loop:
-                    _animation == _PetAnimation.normal ||
-                    _animation == _PetAnimation.busy ||
-                    _windowDragging,
-                onCompleted: () => _onAnimationCompleted('player-completed'),
+            child: Transform.translate(
+              key: const ValueKey('pet-animation-position'),
+              offset: _assetOffset,
+              child: SizedBox.fromSize(
+                size: assetSize,
+                child: AnimatedGif(
+                  asset: _animationAsset,
+                  revision: _animationRevision,
+                  width: assetSize.width,
+                  height: assetSize.height,
+                  loop:
+                      _animation == _PetAnimation.normal ||
+                      _animation == _PetAnimation.busy ||
+                      _windowDragging,
+                  onCompleted: () => _onAnimationCompleted('player-completed'),
+                ),
               ),
             ),
           ),

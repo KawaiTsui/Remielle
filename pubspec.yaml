@@ -63,6 +63,7 @@ flutter:
 
   assets:
     - assets/animations/
+    - windows/runner/resources/app_icon.ico
 
   # To add assets to your application, add an assets section, like this:
   # assets:

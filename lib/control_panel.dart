@@ -138,7 +138,9 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     final value = _todoController.text.trim();
     if (value.isEmpty) return;
     setState(() {
-      _todos.add(TodoEntry(id: _nextTodoId++, title: value));
+      _todos.add(
+        TodoEntry(id: _nextTodoId++, title: value, createdAt: DateTime.now()),
+      );
       _todoController.clear();
     });
     _endInputSession();
@@ -148,9 +150,25 @@ class _ControlPanelPageState extends State<ControlPanelPage>
 
   Future<void> _completeTodo(TodoEntry todo) async {
     if (_editingTodoId == todo.id) _cancelEditing();
-    setState(() => _todos.removeWhere((item) => item.id == todo.id));
+    final index = _todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    setState(() {
+      _todos[index] = todo.copyWith(completedAt: DateTime.now());
+    });
     await _savePanelData();
     await _sendPetEvent('todoDone');
+  }
+
+  Future<void> _restoreTodo(TodoEntry todo) async {
+    final index = _todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    setState(() {
+      _todos[index] = todo.copyWith(
+        createdAt: DateTime.now(),
+        clearCompletedAt: true,
+      );
+    });
+    await _savePanelData();
   }
 
   Future<void> _requestDeleteTodo(TodoEntry todo) async {
@@ -204,7 +222,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     final index = _todos.indexWhere((todo) => todo.id == editingId);
     setState(() {
       if (index >= 0 && value.isNotEmpty) {
-        _todos[index] = TodoEntry(id: editingId, title: value);
+        _todos[index] = _todos[index].copyWith(title: value);
       }
       _editingTodoId = null;
     });
@@ -232,9 +250,10 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.all(Radius.circular(3)),
       ),
-      items: const [
-        PopupMenuItem(value: 'edit', height: 36, child: Text('编辑')),
-        PopupMenuItem(value: 'delete', height: 36, child: Text('删除')),
+      items: [
+        if (todo.completedAt == null)
+          const PopupMenuItem(value: 'edit', height: 36, child: Text('编辑')),
+        const PopupMenuItem(value: 'delete', height: 36, child: Text('删除')),
       ],
     );
     if (selected == 'edit' && mounted) await _startEditing(todo);
@@ -330,7 +349,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _PageHeader(title: 'Todo', subtitle: '管理待办事项'),
+          const _PageHeader(title: '今日待办', subtitle: '记录今天需要完成的事项'),
           const SizedBox(height: 28),
           Row(
             children: [
@@ -369,15 +388,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
               ),
             ],
           ),
-          const SizedBox(height: 24),
-          Text(
-            'Todo 列表',
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          const Divider(height: 1, color: Color(0xffcfcfcf)),
+          const SizedBox(height: 20),
           Expanded(child: _buildTodoList()),
         ],
       ),
@@ -385,113 +396,165 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   );
 
   Widget _buildTodoList() {
-    if (_todos.isEmpty) {
-      return const Align(
-        alignment: Alignment.topLeft,
-        child: Padding(
-          padding: EdgeInsets.only(top: 22),
-          child: Text(
-            '暂无待办事项',
-            style: TextStyle(color: Color(0xff666666), fontSize: 13),
-          ),
-        ),
-      );
-    }
-    return ListView.separated(
+    final now = DateTime.now();
+    final todayTodos =
+        _todos
+            .where(
+              (todo) =>
+                  todo.completedAt == null && _isSameDay(todo.createdAt, now),
+            )
+            .toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final completedTodos =
+        _todos.where((todo) => todo.completedAt != null).toList()
+          ..sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
+
+    return ListView(
       padding: EdgeInsets.zero,
-      itemCount: _todos.length,
-      separatorBuilder: (_, _) =>
-          const Divider(height: 1, color: Color(0xffdedede)),
-      itemBuilder: (context, index) {
-        final todo = _todos[index];
-        return MouseRegion(
-          key: ValueKey('todo-row-${todo.id}'),
-          cursor: SystemMouseCursors.basic,
-          onEnter: (_) => setState(() => _hoveredTodoId = todo.id),
-          onExit: (_) {
-            if (_hoveredTodoId == todo.id) {
-              setState(() => _hoveredTodoId = null);
-            }
-          },
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onSecondaryTapDown: (details) =>
-                _showTodoMenu(todo, details.globalPosition),
-            child: AnimatedContainer(
-              key: ValueKey('todo-row-background-${todo.id}'),
-              duration: const Duration(milliseconds: 100),
-              color: _hoveredTodoId == todo.id
-                  ? const Color(0xffe9e9e9)
-                  : const Color(0xfff5f5f5),
-              height: 52,
-              child: Row(
-                children: [
-                  Checkbox(
-                    key: ValueKey('todo-checkbox-${todo.id}'),
-                    value: false,
-                    onChanged: (_) => _completeTodo(todo),
-                  ),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: _editingTodoId == todo.id
-                        ? TextField(
-                            key: ValueKey('edit-todo-input-${todo.id}'),
-                            controller: _editController,
-                            focusNode: _editFocusNode,
-                            style: const TextStyle(fontSize: 14),
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              contentPadding: EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 8,
-                              ),
-                              constraints: BoxConstraints(
-                                minHeight: 36,
-                                maxHeight: 36,
-                              ),
-                            ),
-                            textInputAction: TextInputAction.done,
-                            onSubmitted: (_) => _finishEditing(),
-                          )
-                        : GestureDetector(
-                            key: ValueKey('todo-title-${todo.id}'),
-                            behavior: HitTestBehavior.opaque,
-                            onTap: () => _startEditing(todo),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                todo.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 14),
-                              ),
-                            ),
-                          ),
-                  ),
-                  SizedBox.square(
-                    dimension: 30,
-                    child: IconButton(
-                      key: ValueKey('delete-todo-${todo.id}'),
-                      tooltip: '删除 Todo',
-                      padding: EdgeInsets.zero,
-                      style: IconButton.styleFrom(
-                        shape: const RoundedRectangleBorder(
-                          borderRadius: BorderRadius.all(Radius.circular(2)),
-                        ),
-                      ),
-                      onPressed: () => _requestDeleteTodo(todo),
-                      icon: const Icon(Icons.remove, size: 17),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                ],
-              ),
-            ),
+      children: [
+        _buildTodoSectionHeader('当天加入', todayTodos.length),
+        if (todayTodos.isEmpty)
+          const _TodoEmptyState('今天还没有待办事项')
+        else
+          ..._withDividers(todayTodos.map((todo) => _buildTodoRow(todo))),
+        const SizedBox(height: 24),
+        _buildTodoSectionHeader('已完成', completedTodos.length),
+        if (completedTodos.isEmpty)
+          const _TodoEmptyState('完成的 Todo 会自动归档到这里')
+        else
+          ..._withDividers(
+            completedTodos.map((todo) => _buildTodoRow(todo, completed: true)),
           ),
-        );
-      },
+      ],
     );
   }
+
+  Widget _buildTodoSectionHeader(String title, int count) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(
+        children: [
+          Text(
+            title,
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '$count',
+            style: const TextStyle(color: Color(0xff666666), fontSize: 12),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      const Divider(height: 1, color: Color(0xffcfcfcf)),
+    ],
+  );
+
+  List<Widget> _withDividers(Iterable<Widget> rows) {
+    final result = <Widget>[];
+    for (final row in rows) {
+      if (result.isNotEmpty) {
+        result.add(const Divider(height: 1, color: Color(0xffdedede)));
+      }
+      result.add(row);
+    }
+    return result;
+  }
+
+  Widget _buildTodoRow(TodoEntry todo, {bool completed = false}) => MouseRegion(
+    key: ValueKey('todo-row-${todo.id}'),
+    cursor: SystemMouseCursors.basic,
+    onEnter: (_) => setState(() => _hoveredTodoId = todo.id),
+    onExit: (_) {
+      if (_hoveredTodoId == todo.id) setState(() => _hoveredTodoId = null);
+    },
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapDown: (details) =>
+          _showTodoMenu(todo, details.globalPosition),
+      child: AnimatedContainer(
+        key: ValueKey('todo-row-background-${todo.id}'),
+        duration: const Duration(milliseconds: 100),
+        color: _hoveredTodoId == todo.id
+            ? const Color(0xffe9e9e9)
+            : const Color(0xfff5f5f5),
+        height: 52,
+        child: Row(
+          children: [
+            Checkbox(
+              key: ValueKey('todo-checkbox-${todo.id}'),
+              value: completed,
+              onChanged: (_) =>
+                  completed ? _restoreTodo(todo) : _completeTodo(todo),
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: !completed && _editingTodoId == todo.id
+                  ? TextField(
+                      key: ValueKey('edit-todo-input-${todo.id}'),
+                      controller: _editController,
+                      focusNode: _editFocusNode,
+                      style: const TextStyle(fontSize: 14),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 8,
+                        ),
+                        constraints: BoxConstraints(
+                          minHeight: 36,
+                          maxHeight: 36,
+                        ),
+                      ),
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => _finishEditing(),
+                    )
+                  : GestureDetector(
+                      key: ValueKey('todo-title-${todo.id}'),
+                      behavior: HitTestBehavior.opaque,
+                      onTap: completed ? null : () => _startEditing(todo),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          todo.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: completed
+                                ? const Color(0xff666666)
+                                : const Color(0xff1a1a1a),
+                            decoration: completed
+                                ? TextDecoration.lineThrough
+                                : TextDecoration.none,
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
+            SizedBox.square(
+              dimension: 30,
+              child: IconButton(
+                key: ValueKey('delete-todo-${todo.id}'),
+                tooltip: '删除 Todo',
+                padding: EdgeInsets.zero,
+                style: IconButton.styleFrom(
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(2)),
+                  ),
+                ),
+                onPressed: () => _requestDeleteTodo(todo),
+                icon: const Icon(Icons.remove, size: 17),
+              ),
+            ),
+            const SizedBox(width: 4),
+          ],
+        ),
+      ),
+    ),
+  );
 
   Widget _buildSettingsPage() => Padding(
     padding: const EdgeInsets.fromLTRB(36, 30, 36, 28),
@@ -685,15 +748,65 @@ class _SettingRow extends StatelessWidget {
 }
 
 class TodoEntry {
-  const TodoEntry({required this.id, required this.title});
+  const TodoEntry({
+    required this.id,
+    required this.title,
+    required this.createdAt,
+    this.completedAt,
+  });
 
   final int id;
   final String title;
+  final DateTime createdAt;
+  final DateTime? completedAt;
 
-  factory TodoEntry.fromJson(Map<String, dynamic> json) =>
-      TodoEntry(id: json['id'] as int, title: json['title'] as String);
+  TodoEntry copyWith({
+    String? title,
+    DateTime? createdAt,
+    DateTime? completedAt,
+    bool clearCompletedAt = false,
+  }) => TodoEntry(
+    id: id,
+    title: title ?? this.title,
+    createdAt: createdAt ?? this.createdAt,
+    completedAt: clearCompletedAt ? null : completedAt ?? this.completedAt,
+  );
 
-  Map<String, Object> toJson() => {'id': id, 'title': title};
+  factory TodoEntry.fromJson(Map<String, dynamic> json) {
+    final createdAt = DateTime.tryParse(json['createdAt'] as String? ?? '');
+    final completedAt = DateTime.tryParse(json['completedAt'] as String? ?? '');
+    return TodoEntry(
+      id: json['id'] as int,
+      title: json['title'] as String,
+      createdAt: createdAt ?? DateTime.now(),
+      completedAt: completedAt,
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'title': title,
+    'createdAt': createdAt.toIso8601String(),
+    'completedAt': completedAt?.toIso8601String(),
+  };
+}
+
+bool _isSameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
+
+class _TodoEmptyState extends StatelessWidget {
+  const _TodoEmptyState(this.message);
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 18, bottom: 4),
+    child: Text(
+      message,
+      style: const TextStyle(color: Color(0xff666666), fontSize: 13),
+    ),
+  );
 }
 
 class _PanelData {
