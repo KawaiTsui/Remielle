@@ -8,6 +8,8 @@
 #include <UIAutomation.h>
 
 #include <memory>
+#include <atomic>
+#include <thread>
 
 #include "win32_window.h"
 
@@ -39,6 +41,14 @@ class FlutterWindow : public Win32Window {
   bool constrain_to_work_area_ = false;
   HWND flutter_view_window_ = nullptr;
   HHOOK keyboard_hook_ = nullptr;
+  HWINEVENTHOOK foreground_event_hook_ = nullptr;
+  HWINEVENTHOOK focus_event_hook_ = nullptr;
+  HWINEVENTHOOK caret_show_event_hook_ = nullptr;
+  HWINEVENTHOOK caret_hide_event_hook_ = nullptr;
+  bool caret_active_ = false;
+  std::atomic<bool> caret_query_running_{false};
+  std::atomic<bool> caret_query_cancelled_{false};
+  std::thread caret_query_thread_;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;

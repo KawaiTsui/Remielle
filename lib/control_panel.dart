@@ -73,6 +73,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   bool _launchAtStartup = false;
   bool _exitTrayOnPetExit = true;
   bool _skipTodoDeleteConfirmation = false;
+  bool _bubbleVisibleByDefault = true;
   bool _updatingStartup = false;
   bool _closing = false;
   bool _inputSessionActive = false;
@@ -105,6 +106,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       _launchAtStartup = data.launchAtStartup;
       _exitTrayOnPetExit = data.exitTrayOnPetExit;
       _skipTodoDeleteConfirmation = data.skipTodoDeleteConfirmation;
+      _bubbleVisibleByDefault = data.bubbleVisibleByDefault;
     });
   }
 
@@ -266,6 +268,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       launchAtStartup: _launchAtStartup,
       exitTrayOnPetExit: _exitTrayOnPetExit,
       skipTodoDeleteConfirmation: _skipTodoDeleteConfirmation,
+      bubbleVisibleByDefault: _bubbleVisibleByDefault,
     ),
   );
 
@@ -286,6 +289,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     } finally {
       if (mounted) setState(() => _updatingStartup = false);
     }
+  }
+
+  Future<void> _setBubbleVisibleByDefault(bool value) async {
+    setState(() => _bubbleVisibleByDefault = value);
+    await _savePanelData();
   }
 
   Future<void> _setExitTrayOnPetExit(bool value) async {
@@ -310,7 +318,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       _endInputSession();
     }
     await _savePanelData();
-    if (!_isFlutterTest) await windowManager.destroy();
+    if (!_isFlutterTest) {
+      await _sendPetEvent('panelClosed');
+      await windowManager.destroy();
+      exit(0);
+    }
   }
 
   @override
@@ -389,12 +401,77 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             ],
           ),
           const SizedBox(height: 20),
-          Expanded(child: _buildTodoList()),
+          Expanded(child: _buildTodoArchiveList()),
         ],
       ),
     ),
   );
 
+  Widget _buildTodoArchiveList() {
+    final today = _startOfDay(DateTime.now());
+    final groups = <DateTime, List<TodoEntry>>{};
+    for (final todo in _todos.where((todo) => todo.completedAt == null)) {
+      final day = _startOfDay(todo.createdAt);
+      (groups[day] ??= <TodoEntry>[]).add(todo);
+    }
+    groups.putIfAbsent(today, () => <TodoEntry>[]);
+    final days = groups.keys.toList()..sort((a, b) => b.compareTo(a));
+    final children = <Widget>[];
+    for (var i = 0; i < days.length; i++) {
+      final day = days[i];
+      final todos = groups[day]!
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      children.add(
+        _buildTodoSectionHeader(_todoDayLabel(day, today), todos.length),
+      );
+      if (todos.isEmpty) {
+        children.add(const _TodoEmptyState('今天还没有待办事项'));
+      } else {
+        children.addAll(
+          _withDividers(
+            todos.map(
+              (todo) =>
+                  _buildTodoRow(todo, completed: todo.completedAt != null),
+            ),
+          ),
+        );
+      }
+      if (i < days.length - 1) children.add(const SizedBox(height: 24));
+    }
+    final completedTodos =
+        _todos.where((todo) => todo.completedAt != null).toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final completed = completedTodos.length;
+    children
+      ..add(const SizedBox(height: 24))
+      ..add(_buildTodoSectionHeader('已完成', completed));
+    if (completed > 0) {
+      final completedGroups = <DateTime, List<TodoEntry>>{};
+      for (final todo in completedTodos) {
+        final day = _startOfDay(todo.createdAt);
+        (completedGroups[day] ??= <TodoEntry>[]).add(todo);
+      }
+      final completedDays = completedGroups.keys.toList()
+        ..sort((a, b) => b.compareTo(a));
+      for (final day in completedDays) {
+        final todos = completedGroups[day]!
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        children
+          ..add(_buildArchiveDayHeader(_formatTodoDate(day)))
+          ..addAll(
+            _withDividers(
+              todos.map((todo) => _buildTodoRow(todo, completed: true)),
+            ),
+          );
+      }
+    }
+    if (completed == 0) {
+      children.add(const _TodoEmptyState('完成的 Todo 会自动归档到这里'));
+    }
+    return ListView(padding: EdgeInsets.zero, children: children);
+  }
+
+  // ignore: unused_element
   Widget _buildTodoList() {
     final now = DateTime.now();
     final todayTodos =
@@ -463,6 +540,18 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     return result;
   }
 
+  Widget _buildArchiveDayHeader(String label) => Padding(
+    padding: const EdgeInsets.only(top: 14, bottom: 6),
+    child: Text(
+      label,
+      style: const TextStyle(
+        color: Color(0xff666666),
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
+
   Widget _buildTodoRow(TodoEntry todo, {bool completed = false}) => MouseRegion(
     key: ValueKey('todo-row-${todo.id}'),
     cursor: SystemMouseCursors.basic,
@@ -491,27 +580,32 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             ),
             const SizedBox(width: 4),
             Expanded(
-              child: !completed && _editingTodoId == todo.id
-                  ? TextField(
-                      key: ValueKey('edit-todo-input-${todo.id}'),
-                      controller: _editController,
-                      focusNode: _editFocusNode,
-                      style: const TextStyle(fontSize: 14),
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        contentPadding: EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 8,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (!completed && _editingTodoId == todo.id)
+                    SizedBox(
+                      height: 26,
+                      child: TextField(
+                        key: ValueKey('edit-todo-input-${todo.id}'),
+                        controller: _editController,
+                        focusNode: _editFocusNode,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(horizontal: 8),
+                          constraints: BoxConstraints(
+                            minHeight: 26,
+                            maxHeight: 26,
+                          ),
                         ),
-                        constraints: BoxConstraints(
-                          minHeight: 36,
-                          maxHeight: 36,
-                        ),
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => _finishEditing(),
                       ),
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => _finishEditing(),
                     )
-                  : GestureDetector(
+                  else
+                    GestureDetector(
                       key: ValueKey('todo-title-${todo.id}'),
                       behavior: HitTestBehavior.opaque,
                       onTap: completed ? null : () => _startEditing(todo),
@@ -533,6 +627,16 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                         ),
                       ),
                     ),
+                  Text(
+                    _formatTodoCreatedDate(todo.createdAt),
+                    key: ValueKey('todo-created-date-${todo.id}'),
+                    style: const TextStyle(
+                      color: Color(0xff888888),
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
             ),
             SizedBox.square(
               dimension: 30,
@@ -570,6 +674,15 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             key: const ValueKey('startup-switch'),
             value: _launchAtStartup,
             onChanged: _updatingStartup ? null : _setLaunchAtStartup,
+          ),
+        ),
+        _SettingRow(
+          title: '启动时显示待办气泡',
+          subtitle: '桌宠启动时默认显示 Todo 气泡',
+          control: Switch(
+            key: const ValueKey('bubble-default-switch'),
+            value: _bubbleVisibleByDefault,
+            onChanged: _setBubbleVisibleByDefault,
           ),
         ),
         _SettingRow(
@@ -794,6 +907,26 @@ class TodoEntry {
 bool _isSameDay(DateTime a, DateTime b) =>
     a.year == b.year && a.month == b.month && a.day == b.day;
 
+DateTime _startOfDay(DateTime value) =>
+    DateTime(value.year, value.month, value.day);
+
+String _todoDayLabel(DateTime day, DateTime today) {
+  final difference = today.difference(day).inDays;
+  if (difference == 0) return '当天加入';
+  if (difference == 1) return '昨日待办';
+  return '${day.year}/${day.month}/${day.day}';
+}
+
+String _formatTodoCreatedDate(DateTime value) {
+  return _formatTodoDate(value);
+}
+
+String _formatTodoDate(DateTime value) {
+  final month = value.month.toString().padLeft(2, '0');
+  final day = value.day.toString().padLeft(2, '0');
+  return '${value.year}/$month/$day';
+}
+
 class _TodoEmptyState extends StatelessWidget {
   const _TodoEmptyState(this.message);
 
@@ -815,18 +948,21 @@ class _PanelData {
     required this.launchAtStartup,
     required this.exitTrayOnPetExit,
     required this.skipTodoDeleteConfirmation,
+    required this.bubbleVisibleByDefault,
   });
 
   const _PanelData.defaults()
     : todos = const [],
       launchAtStartup = false,
       exitTrayOnPetExit = true,
-      skipTodoDeleteConfirmation = false;
+      skipTodoDeleteConfirmation = false,
+      bubbleVisibleByDefault = true;
 
   final List<TodoEntry> todos;
   final bool launchAtStartup;
   final bool exitTrayOnPetExit;
   final bool skipTodoDeleteConfirmation;
+  final bool bubbleVisibleByDefault;
 }
 
 class _PanelDataStore {
@@ -845,10 +981,15 @@ class _PanelDataStore {
       final json =
           jsonDecode(await _file.readAsString()) as Map<String, dynamic>;
       final todosJson = json['todos'] as List<dynamic>? ?? const [];
-      return _PanelData(
-        todos: todosJson
-            .map((item) => TodoEntry.fromJson(item as Map<String, dynamic>))
-            .toList(),
+      final cutoff = _startOfDay(
+        DateTime.now(),
+      ).subtract(const Duration(days: 6));
+      final todos = todosJson
+          .map((item) => TodoEntry.fromJson(item as Map<String, dynamic>))
+          .where((todo) => !_startOfDay(todo.createdAt).isBefore(cutoff))
+          .toList();
+      final data = _PanelData(
+        todos: todos,
         launchAtStartup: json['launchAtStartup'] as bool? ?? false,
         exitTrayOnPetExit:
             json['exitTrayOnPetExit'] as bool? ??
@@ -856,7 +997,10 @@ class _PanelDataStore {
             true,
         skipTodoDeleteConfirmation:
             json['skipTodoDeleteConfirmation'] as bool? ?? false,
+        bubbleVisibleByDefault: json['bubbleVisibleByDefault'] as bool? ?? true,
       );
+      if (todos.length != todosJson.length) await save(data);
+      return data;
     } catch (_) {
       return const _PanelData.defaults();
     }
@@ -864,13 +1008,20 @@ class _PanelDataStore {
 
   static Future<void> save(_PanelData data) async {
     if (_isFlutterTest) return;
+    final cutoff = _startOfDay(
+      DateTime.now(),
+    ).subtract(const Duration(days: 6));
+    final todos = data.todos
+        .where((todo) => !_startOfDay(todo.createdAt).isBefore(cutoff))
+        .toList(growable: false);
     await _file.parent.create(recursive: true);
     await _file.writeAsString(
       jsonEncode({
-        'todos': data.todos.map((todo) => todo.toJson()).toList(),
+        'todos': todos.map((todo) => todo.toJson()).toList(),
         'launchAtStartup': data.launchAtStartup,
         'exitTrayOnPetExit': data.exitTrayOnPetExit,
         'skipTodoDeleteConfirmation': data.skipTodoDeleteConfirmation,
+        'bubbleVisibleByDefault': data.bubbleVisibleByDefault,
       }),
       flush: true,
     );

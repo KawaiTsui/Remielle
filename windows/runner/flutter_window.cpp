@@ -5,20 +5,111 @@
 #include <commctrl.h>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include "flutter/generated_plugin_registrant.h"
 
 namespace {
 
 std::atomic<ULONGLONG> g_last_keyboard_input_tick{0};
+std::atomic<bool> g_caret_event_pending{false};
+HWND g_event_window = nullptr;
+constexpr UINT kCaretStateChangedMessage = WM_APP + 1;
+constexpr UINT kKeyboardActivityMessage = WM_APP + 2;
+constexpr UINT kCaretQueryResultMessage = WM_APP + 3;
+constexpr ULONG_PTR kPetEventDataId = 0x524D454C;
+
+struct PetWindowSearchContext {
+  DWORD current_process_id;
+  HWND result = nullptr;
+};
+
+BOOL CALLBACK FindPetWindow(HWND window, LPARAM data) {
+  auto* context = reinterpret_cast<PetWindowSearchContext*>(data);
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(window, &process_id);
+  if (process_id == 0 || process_id == context->current_process_id ||
+      !IsWindowVisible(window)) {
+    return TRUE;
+  }
+  wchar_t title[128] = {};
+  GetWindowTextW(window, title,
+                static_cast<int>(sizeof(title) / sizeof(title[0])));
+  if (std::wstring(title).find(L"remielle") == std::wstring::npos) {
+    return TRUE;
+  }
+  context->result = window;
+  return FALSE;
+}
+
+bool SendPetEvent(const std::string& event) {
+  PetWindowSearchContext context{GetCurrentProcessId()};
+  EnumWindows(FindPetWindow, reinterpret_cast<LPARAM>(&context));
+  if (!context.result) {
+    return false;
+  }
+  COPYDATASTRUCT data = {};
+  data.dwData = kPetEventDataId;
+  data.cbData = static_cast<DWORD>(event.size() + 1);
+  data.lpData = const_cast<char*>(event.c_str());
+  return SendMessageW(context.result, WM_COPYDATA, 0,
+                      reinterpret_cast<LPARAM>(&data)) != 0;
+}
+
+BOOL CALLBACK FindControlPanelWindow(HWND window, LPARAM data) {
+  auto* context = reinterpret_cast<PetWindowSearchContext*>(data);
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(window, &process_id);
+  if (process_id == 0 || process_id == context->current_process_id ||
+      !IsWindowVisible(window)) {
+    return TRUE;
+  }
+  wchar_t title[256] = {};
+  GetWindowTextW(window, title,
+                 static_cast<int>(sizeof(title) / sizeof(title[0])));
+  const std::wstring window_title(title);
+  if (window_title.find(L"Remielle") == std::wstring::npos ||
+      window_title == L"remielle") {
+    return TRUE;
+  }
+  context->result = window;
+  return FALSE;
+}
+
+bool ShowExistingControlPanel() {
+  PetWindowSearchContext context{GetCurrentProcessId()};
+  EnumWindows(FindControlPanelWindow, reinterpret_cast<LPARAM>(&context));
+  if (!context.result) {
+    return false;
+  }
+  ShowWindow(context.result, SW_RESTORE);
+  SetForegroundWindow(context.result);
+  return true;
+}
 
 LRESULT CALLBACK KeyboardActivityHook(int code, WPARAM wparam, LPARAM lparam) {
   if (code == HC_ACTION &&
       (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN)) {
     g_last_keyboard_input_tick.store(GetTickCount64(),
                                      std::memory_order_relaxed);
+    if (g_event_window) {
+      PostMessage(g_event_window, kKeyboardActivityMessage, 0, 0);
+    }
   }
   return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+void CALLBACK CaretWinEventProc(HWINEVENTHOOK hook, DWORD event, HWND window,
+                                LONG object_id, LONG child_id,
+                                DWORD event_thread_id, DWORD event_time) {
+  if ((event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE) &&
+      object_id != OBJID_CARET) {
+    return;
+  }
+  if (!g_event_window || g_caret_event_pending.exchange(true)) {
+    return;
+  }
+  PostMessage(g_event_window, kCaretStateChangedMessage, 0, 0);
 }
 
 bool IsNativeTextCaretActive() {
@@ -213,6 +304,20 @@ bool FlutterWindow::OnCreate() {
                                      std::memory_order_relaxed);
     keyboard_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardActivityHook,
                                       GetModuleHandle(nullptr), 0);
+    g_event_window = GetHandle();
+    constexpr DWORD flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+    foreground_event_hook_ = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+        CaretWinEventProc, 0, 0, flags);
+    focus_event_hook_ = SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_FOCUS,
+                                        nullptr, CaretWinEventProc, 0, 0,
+                                        flags);
+    caret_show_event_hook_ = SetWinEventHook(
+        EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr, CaretWinEventProc, 0, 0,
+        flags);
+    caret_hide_event_hook_ = SetWinEventHook(
+        EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE, nullptr, CaretWinEventProc, 0, 0,
+        flags);
   }
   CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
                    IID_PPV_ARGS(&ui_automation_));
@@ -233,6 +338,16 @@ bool FlutterWindow::OnCreate() {
               flutter::EncodableValue(GetKeyboardInputIdleMilliseconds()));
           return;
         }
+        if (call.method_name() == "sendPetEvent") {
+          const auto* event = std::get_if<std::string>(call.arguments());
+          result->Success(flutter::EncodableValue(
+              event != nullptr && SendPetEvent(*event)));
+          return;
+        }
+        if (call.method_name() == "showExistingControlPanel") {
+          result->Success(flutter::EncodableValue(ShowExistingControlPanel()));
+          return;
+        }
         result->NotImplemented();
       });
   flutter_view_window_ = flutter_controller_->view()->GetNativeWindow();
@@ -250,11 +365,19 @@ bool FlutterWindow::OnCreate() {
   // registered. The following call ensures a frame is pending to ensure the
   // window is shown. It is a no-op if the first frame hasn't completed yet.
   flutter_controller_->ForceRedraw();
+  if (constrain_to_work_area_) {
+    g_caret_event_pending.store(true);
+    PostMessage(GetHandle(), kCaretStateChangedMessage, 0, 0);
+  }
 
   return true;
 }
 
 void FlutterWindow::OnDestroy() {
+  caret_query_cancelled_.store(true);
+  if (caret_query_thread_.joinable()) {
+    caret_query_thread_.join();
+  }
   if (flutter_view_window_ && disable_accessibility_) {
     RemoveWindowSubclass(flutter_view_window_, FlutterViewSubclassProc, 1);
   }
@@ -262,6 +385,19 @@ void FlutterWindow::OnDestroy() {
   if (keyboard_hook_) {
     UnhookWindowsHookEx(keyboard_hook_);
     keyboard_hook_ = nullptr;
+  }
+  for (HWINEVENTHOOK hook : {foreground_event_hook_, focus_event_hook_,
+                             caret_show_event_hook_, caret_hide_event_hook_}) {
+    if (hook) {
+      UnhookWinEvent(hook);
+    }
+  }
+  foreground_event_hook_ = nullptr;
+  focus_event_hook_ = nullptr;
+  caret_show_event_hook_ = nullptr;
+  caret_hide_event_hook_ = nullptr;
+  if (g_event_window == GetHandle()) {
+    g_event_window = nullptr;
   }
   system_channel_.reset();
   if (ui_automation_) {
@@ -284,6 +420,68 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == kCaretStateChangedMessage) {
+    g_caret_event_pending.store(false);
+    if (caret_query_running_.exchange(true)) {
+      return 0;
+    }
+    caret_query_cancelled_.store(false);
+    if (caret_query_thread_.joinable()) {
+      caret_query_thread_.join();
+    }
+    caret_query_thread_ = std::thread([this]() {
+      bool active = false;
+      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      IUIAutomation* automation = nullptr;
+      if (!caret_query_cancelled_.load()) {
+        CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_PPV_ARGS(&automation));
+        active = IsNativeTextCaretActive() ||
+                 IsAutomationTextCaretActive(automation);
+      }
+      if (automation) {
+        automation->Release();
+      }
+      CoUninitialize();
+      if (!caret_query_cancelled_.load()) {
+        PostMessage(GetHandle(), kCaretQueryResultMessage, active ? 1 : 0, 0);
+      }
+    });
+    return 0;
+  }
+  if (message == kCaretQueryResultMessage) {
+    if (caret_query_thread_.joinable()) {
+      caret_query_thread_.join();
+    }
+    caret_query_running_.store(false);
+    caret_active_ = wparam != 0;
+    if (system_channel_) {
+      system_channel_->InvokeMethod(
+          "caretStateChanged",
+          std::make_unique<flutter::EncodableValue>(caret_active_));
+    }
+    return 0;
+  }
+  if (message == WM_COPYDATA && constrain_to_work_area_) {
+    const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+    if (data && data->dwData == kPetEventDataId && data->lpData &&
+        data->cbData > 0) {
+      const auto* bytes = static_cast<const char*>(data->lpData);
+      const size_t length =
+          bytes[data->cbData - 1] == '\0' ? data->cbData - 1 : data->cbData;
+      system_channel_->InvokeMethod(
+          "petEvent",
+          std::make_unique<flutter::EncodableValue>(
+              std::string(bytes, bytes + length)));
+      return TRUE;
+    }
+  }
+  if (message == kKeyboardActivityMessage) {
+    if (caret_active_ && system_channel_) {
+      system_channel_->InvokeMethod("keyboardActivity", nullptr);
+    }
+    return 0;
+  }
   if (constrain_to_work_area_ && message == WM_MOVING) {
     auto* proposed = reinterpret_cast<RECT*>(lparam);
     MONITORINFO monitor_info{sizeof(MONITORINFO)};

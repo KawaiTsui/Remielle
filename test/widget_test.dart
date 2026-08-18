@@ -23,6 +23,19 @@ Transform _petAnimationPosition(WidgetTester tester, String asset) =>
       ),
     );
 
+Future<void> _sendSystemEvent(
+  WidgetTester tester,
+  String method, {
+  Object? arguments,
+}) async {
+  const codec = StandardMethodCodec();
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    'remielle/system',
+    codec.encodeMethodCall(MethodCall(method, arguments)),
+    (_) {},
+  );
+}
+
 void main() {
   testWidgets('宠物主页显示动画资源', (tester) async {
     await tester.pumpWidget(const RemielleApp());
@@ -95,46 +108,46 @@ void main() {
     );
   });
 
-  testWidgets('系统文本光标激活和结束时播放忙碌动画', (tester) async {
-    var caretActive = false;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      const MethodChannel('remielle/system'),
-      (call) async {
-        if (call.method == 'isTextCaretActive') return caretActive;
-        if (call.method == 'getKeyboardInputIdleMilliseconds') return 0;
-        return null;
-      },
-    );
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        const MethodChannel('remielle/system'),
-        null,
-      ),
+  testWidgets('bubble input focus drives the busy animation', (tester) async {
+    await tester.pumpWidget(const RemielleApp());
+
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
     );
 
+    await tester.tap(find.byIcon(Icons.close));
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
+  });
+
+  testWidgets('系统文本光标激活和结束时播放忙碌动画', (tester) async {
     await tester.pumpWidget(const RemielleApp());
     await tester.pump();
-    caretActive = true;
-    await tester.pump(const Duration(milliseconds: 220));
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
     await tester.pump();
     expect(
       _petAnimation(tester, 'assets/animations/d.gif').asset,
       'assets/animations/d.gif',
     );
     var position = _petAnimationPosition(tester, 'assets/animations/d.gif');
-    expect(position.transform.getTranslation().x, -14);
+    expect(position.transform.getTranslation().x, 0);
     expect(position.transform.getTranslation().y, 0);
 
-    caretActive = false;
-    await tester.pump(const Duration(milliseconds: 220));
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
     await tester.pump();
     expect(
       _petAnimation(tester, 'assets/animations/d_win.gif').asset,
       'assets/animations/d_win.gif',
     );
     position = _petAnimationPosition(tester, 'assets/animations/d_win.gif');
-    expect(position.transform.getTranslation().x, -21);
-    expect(position.transform.getTranslation().y, -7);
+    expect(position.transform.getTranslation().x, 0);
+    expect(position.transform.getTranslation().y, 0);
 
     await tester.pump(const Duration(milliseconds: 1300));
     expect(
@@ -147,48 +160,38 @@ void main() {
   });
 
   testWidgets('光标激活但系统空闲 30 秒后回到待机', (tester) async {
-    var caretActive = true;
-    var keyboardIdleMilliseconds = 0;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      const MethodChannel('remielle/system'),
-      (call) async {
-        if (call.method == 'isTextCaretActive') return caretActive;
-        if (call.method == 'getKeyboardInputIdleMilliseconds') {
-          return keyboardIdleMilliseconds;
-        }
-        return null;
-      },
-    );
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        const MethodChannel('remielle/system'),
-        null,
-      ),
-    );
-
     await tester.pumpWidget(const RemielleApp());
     await tester.pump();
-    keyboardIdleMilliseconds = 30 * 1000;
-    await tester.pump(const Duration(milliseconds: 250));
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
     await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+
+    await tester.pump(const Duration(seconds: 9));
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+    await tester.pump(const Duration(seconds: 2));
     expect(
       _petAnimation(tester, 'assets/animations/d_win.gif').asset,
       'assets/animations/d_win.gif',
     );
-
     await tester.pump(const Duration(milliseconds: 1300));
     expect(
       _petAnimation(tester, 'assets/animations/a.gif').asset,
       'assets/animations/a.gif',
     );
 
-    keyboardIdleMilliseconds = 0;
-    await tester.pump(const Duration(milliseconds: 250));
+    await _sendSystemEvent(tester, 'keyboardActivity');
+    await tester.pump();
     expect(
       _petAnimation(tester, 'assets/animations/d.gif').asset,
       'assets/animations/d.gif',
     );
-    caretActive = false;
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
   });
 
   testWidgets('控制面板可以添加 Todo', (tester) async {
