@@ -1,17 +1,39 @@
-# remielle
+# 蕾米埃尔桌宠 Remielle Desktop Pet
 
-A new Flutter project.
+绝区零（Zenless Zone Zero）角色 **蕾米埃尔** 的 Windows 桌面宠物。  
+轻量、免安装，带简单待办（Todo）功能。
 
-## Getting Started
+## 功能
 
-This project is a starting point for a Flutter application.
+- 桌面宠物展示（可拖动）
+- 简单待办：添加、完成、归档
+- 基础提醒（可选）
+- 解压即用
 
-A few resources to get you started if this is your first Flutter project:
+## 系统要求
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+- Windows 10 / 11（64 位）
+- 无需安装，解压后直接运行
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## 下载
+
+前往 [Releases](../../releases) 下载最新版本：
+
+- `remielle-windows-x64-v1.0.0.rar`
+
+## 使用方法
+
+1. 下载并解压.rar
+2. 运行主程序`remielle.exe`
+3. 桌面出现宠物后即可拖动、使用待办功能
+
+## 反馈
+
+- 有问题或建议：直接开 [Issue](../../issues)
+- 欢迎反馈崩溃、显示异常、待办相关问题
+
+## 声明
+
+- 本项目为爱好者自制工具，与米哈游 / 绝区零官方无关
+- 角色形象仅用于个人学习与交流，请勿用于商业用途
+- 如有侵权，请联系删除
