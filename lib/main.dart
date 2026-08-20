@@ -34,6 +34,9 @@ class _UpdateInfo {
 }
 
 class _UpdateService {
+  static File get _sameVersionMarker =>
+      File('${Directory.systemTemp.path}\\remielle-same-version-update.marker');
+
   static Future<_UpdateInfo?> check() async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
@@ -74,12 +77,20 @@ class _UpdateService {
       if (url is! String || !_isNewer(version)) {
         return null;
       }
+      if (_isSameVersion(version) && await _sameVersionMarker.exists()) {
+        await _sameVersionMarker.delete();
+        return null;
+      }
       return _UpdateInfo(version: version, downloadUrl: url);
     } catch (_) {
       return null;
     } finally {
       client.close(force: true);
     }
+  }
+
+  static Future<void> markSameVersionUpdate() async {
+    await _sameVersionMarker.writeAsString('completed');
   }
 
   static Future<File> download(
@@ -194,7 +205,23 @@ try {
       final av = i < a.length ? a[i] : 0, bv = i < b.length ? b[i] : 0;
       if (av != bv) return av > bv;
     }
-    return false;
+    return true;
+  }
+
+  static bool _isSameVersion(String remote) {
+    List<int> parse(String value) => value
+        .split('.')
+        .map(
+          (part) =>
+              int.tryParse(part.replaceFirst(RegExp(r'[^0-9].*'), '')) ?? 0,
+        )
+        .toList();
+    final a = parse(remote), b = parse(_remielleVersion);
+    for (var i = 0; i < max(a.length, b.length); i++) {
+      final av = i < a.length ? a[i] : 0, bv = i < b.length ? b[i] : 0;
+      if (av != bv) return false;
+    }
+    return true;
   }
 }
 
@@ -571,6 +598,9 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       });
       if (!mounted) return;
       await _saveWindowPosition();
+      if (_UpdateService._isSameVersion(update.version)) {
+        await _UpdateService.markSameVersionUpdate();
+      }
       await _UpdateService.launchUpdater(archive);
       exit(0);
     } catch (_) {
