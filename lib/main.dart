@@ -1527,13 +1527,27 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       );
       if (existing == true) return;
     }
-    final process = await Process.start(Platform.resolvedExecutable, [
-      '--control-panel',
-    ], mode: ProcessStartMode.detachedWithStdio);
-    _panelProcess = process;
-    process.exitCode.then((_) {
-      if (identical(_panelProcess, process)) _panelProcess = null;
-    });
+    final executable = File(Platform.resolvedExecutable);
+    final log = File('${Directory.systemTemp.path}\\remielle-panel.log');
+    try {
+      await log.writeAsString(
+        'launch=${executable.path}\nexists=${await executable.exists()}\n',
+        mode: FileMode.write,
+      );
+      final process = await Process.start(
+        executable.path,
+        const ['--control-panel'],
+        workingDirectory: executable.parent.path,
+        mode: ProcessStartMode.detached,
+      );
+      _panelProcess = process;
+      process.exitCode.then((_) {
+        if (identical(_panelProcess, process)) _panelProcess = null;
+      });
+      await log.writeAsString('pid=${process.pid}\n', mode: FileMode.append);
+    } catch (error) {
+      await log.writeAsString('error=$error\n', mode: FileMode.append);
+    }
   }
 
   @override
