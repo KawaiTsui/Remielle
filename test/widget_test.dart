@@ -466,15 +466,28 @@ void main() {
     final exitTray = tester.widget<Switch>(
       find.byKey(const ValueKey('exit-tray-switch')),
     );
+    final autoUpdate = tester.widget<Switch>(
+      find.byKey(const ValueKey('auto-update-switch')),
+    );
     final skipDeleteConfirmation = tester.widget<Switch>(
       find.byKey(const ValueKey('skip-delete-confirmation-switch')),
     );
     expect(startup.value, isFalse);
+    expect(autoUpdate.value, isFalse);
     expect(exitTray.value, isTrue);
     expect(skipDeleteConfirmation.value, isFalse);
     expect(find.text('开机启动'), findsOneWidget);
     expect(find.text('退出时同时退出托盘'), findsOneWidget);
     expect(find.text('删除 Todo 时不再二次提醒'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('auto-update-switch')));
+    await tester.pump();
+    expect(
+      tester
+          .widget<Switch>(find.byKey(const ValueKey('auto-update-switch')))
+          .value,
+      isTrue,
+    );
   });
 
   testWidgets('控制面板使用说明页显示操作指南和 GitHub 链接', (tester) async {

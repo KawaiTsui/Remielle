@@ -74,6 +74,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   bool _exitTrayOnPetExit = true;
   bool _skipTodoDeleteConfirmation = false;
   bool _bubbleVisibleByDefault = true;
+  bool _autoUpdate = false;
   bool _updatingStartup = false;
   bool _closing = false;
   bool _inputSessionActive = false;
@@ -110,6 +111,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       _exitTrayOnPetExit = data.exitTrayOnPetExit;
       _skipTodoDeleteConfirmation = data.skipTodoDeleteConfirmation;
       _bubbleVisibleByDefault = data.bubbleVisibleByDefault;
+      _autoUpdate = data.autoUpdate;
     });
   }
 
@@ -357,6 +359,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       exitTrayOnPetExit: _exitTrayOnPetExit,
       skipTodoDeleteConfirmation: _skipTodoDeleteConfirmation,
       bubbleVisibleByDefault: _bubbleVisibleByDefault,
+      autoUpdate: _autoUpdate,
     ),
   );
 
@@ -381,6 +384,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
 
   Future<void> _setBubbleVisibleByDefault(bool value) async {
     setState(() => _bubbleVisibleByDefault = value);
+    await _savePanelData();
+  }
+
+  Future<void> _setAutoUpdate(bool value) async {
+    setState(() => _autoUpdate = value);
     await _savePanelData();
   }
 
@@ -880,6 +888,15 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           ),
         ),
         _SettingRow(
+          title: '自动更新',
+          subtitle: '发现新版本后自动下载并安装，不再询问',
+          control: Switch(
+            key: const ValueKey('auto-update-switch'),
+            value: _autoUpdate,
+            onChanged: _setAutoUpdate,
+          ),
+        ),
+        _SettingRow(
           title: '启动时显示待办气泡',
           subtitle: '桌宠启动时默认显示 Todo 气泡',
           control: Switch(
@@ -1302,6 +1319,7 @@ class _PanelData {
     required this.exitTrayOnPetExit,
     required this.skipTodoDeleteConfirmation,
     required this.bubbleVisibleByDefault,
+    required this.autoUpdate,
   });
 
   const _PanelData.defaults()
@@ -1309,13 +1327,15 @@ class _PanelData {
       launchAtStartup = false,
       exitTrayOnPetExit = true,
       skipTodoDeleteConfirmation = false,
-      bubbleVisibleByDefault = true;
+      bubbleVisibleByDefault = true,
+      autoUpdate = false;
 
   final List<TodoEntry> todos;
   final bool launchAtStartup;
   final bool exitTrayOnPetExit;
   final bool skipTodoDeleteConfirmation;
   final bool bubbleVisibleByDefault;
+  final bool autoUpdate;
 }
 
 class _PanelDataStore {
@@ -1351,6 +1371,7 @@ class _PanelDataStore {
         skipTodoDeleteConfirmation:
             json['skipTodoDeleteConfirmation'] as bool? ?? false,
         bubbleVisibleByDefault: json['bubbleVisibleByDefault'] as bool? ?? true,
+        autoUpdate: json['autoUpdate'] as bool? ?? false,
       );
       if (todos.length != todosJson.length) await save(data);
       return data;
@@ -1375,6 +1396,7 @@ class _PanelDataStore {
         'exitTrayOnPetExit': data.exitTrayOnPetExit,
         'skipTodoDeleteConfirmation': data.skipTodoDeleteConfirmation,
         'bubbleVisibleByDefault': data.bubbleVisibleByDefault,
+        'autoUpdate': data.autoUpdate,
       }),
       flush: true,
     );

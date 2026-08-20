@@ -22,6 +22,181 @@ const _petBubbleTailHeight = 10.0;
 const _minPetScale = 0.5;
 const _maxPetScale = 2.0;
 const _petScalePerDragPixel = 0.005;
+const _remielleVersion = '1.0.1';
+const _githubRepository = 'KawaiTsui/Remielle';
+
+enum _UpdateStatus { idle, available, downloading, failed }
+
+class _UpdateInfo {
+  const _UpdateInfo({required this.version, required this.downloadUrl});
+  final String version;
+  final String downloadUrl;
+}
+
+class _UpdateService {
+  static Future<_UpdateInfo?> check() async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(
+        Uri.parse(
+          'https://api.github.com/repos/$_githubRepository/releases/latest',
+        ),
+      );
+      request.headers
+        ..set(HttpHeaders.acceptHeader, 'application/vnd.github+json')
+        ..set(HttpHeaders.userAgentHeader, 'Remielle/$_remielleVersion');
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      if (response.statusCode != HttpStatus.ok) {
+        return null;
+      }
+      final data = jsonDecode(await response.transform(utf8.decoder).join());
+      if (data is! Map<String, dynamic> || data['tag_name'] is! String) {
+        return null;
+      }
+      final version = (data['tag_name'] as String).replaceFirst(
+        RegExp('^v'),
+        '',
+      );
+      final assets = data['assets'];
+      if (assets is! List) {
+        return null;
+      }
+      final asset = assets.whereType<Map<String, dynamic>>().firstWhere(
+        (item) =>
+            item['name'] is String &&
+            (item['name'] as String).contains('windows-x64') &&
+            (item['name'] as String).endsWith('.zip'),
+        orElse: () => <String, dynamic>{},
+      );
+      final url = asset['browser_download_url'];
+      if (url is! String || !_isNewer(version)) {
+        return null;
+      }
+      return _UpdateInfo(version: version, downloadUrl: url);
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static Future<File> download(
+    _UpdateInfo info,
+    ValueChanged<double> progress,
+  ) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final request = await client.getUrl(Uri.parse(info.downloadUrl));
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'Remielle/$_remielleVersion',
+      );
+      final response = await request.close().timeout(
+        const Duration(seconds: 30),
+      );
+      if (response.statusCode != HttpStatus.ok) {
+        throw HttpException('download failed');
+      }
+      final file = File(
+        '${Directory.systemTemp.path}\\remielle-${info.version}.zip',
+      );
+      try {
+        final sink = file.openWrite();
+        var received = 0;
+        await for (final chunk in response) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (response.contentLength > 0) {
+            progress(received / response.contentLength);
+          }
+        }
+        await sink.close();
+        progress(1);
+        return file;
+      } catch (_) {
+        try {
+          await file.delete();
+        } catch (_) {}
+        rethrow;
+      }
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static Future<void> launchUpdater(File archive) async {
+    final script = File(
+      '${Directory.systemTemp.path}\\remielle-updater-${DateTime.now().microsecondsSinceEpoch}.ps1',
+    );
+    await script.writeAsString(r'''
+param([string]$Archive, [string]$Executable, [int]$Pid)
+$ErrorActionPreference = 'Stop'
+while (Get-Process -Id $Pid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }
+$root = Split-Path -Parent $Executable
+$temp = Join-Path ([IO.Path]::GetTempPath()) ('remielle-update-' + [guid]::NewGuid())
+$backup = $root + '.backup-' + [guid]::NewGuid()
+try {
+  New-Item -ItemType Directory -Force -Path $temp | Out-Null
+  Expand-Archive -LiteralPath $Archive -DestinationPath $temp -Force
+  $executableName = Split-Path -Leaf $Executable
+  if (-not (Test-Path -LiteralPath (Join-Path $temp $executableName))) {
+    throw 'The update archive does not contain the application executable.'
+  }
+
+  Get-Process | Where-Object {
+    try { $_.Path -eq $Executable } catch { $false }
+  } | Stop-Process -Force -ErrorAction SilentlyContinue
+  Move-Item -LiteralPath $root -Destination $backup -Force
+  Move-Item -LiteralPath $temp -Destination $root -Force
+  Start-Process -FilePath $Executable
+  Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+  if (Test-Path -LiteralPath $backup) {
+    if (Test-Path -LiteralPath $root) {
+      Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Move-Item -LiteralPath $backup -Destination $root -Force
+    Start-Process -FilePath $Executable -ErrorAction SilentlyContinue
+  }
+} finally {
+  Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}
+''');
+    await Process.start('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-WindowStyle',
+      'Hidden',
+      '-File',
+      script.path,
+      archive.path,
+      Platform.resolvedExecutable,
+      pid.toString(),
+    ], mode: ProcessStartMode.detached);
+  }
+
+  static bool _isNewer(String remote) {
+    List<int> parse(String value) => value
+        .split('.')
+        .map(
+          (part) =>
+              int.tryParse(part.replaceFirst(RegExp(r'[^0-9].*'), '')) ?? 0,
+        )
+        .toList();
+    final a = parse(remote), b = parse(_remielleVersion);
+    for (var i = 0; i < max(a.length, b.length); i++) {
+      final av = i < a.length ? a[i] : 0, bv = i < b.length ? b[i] : 0;
+      if (av != bv) return av > bv;
+    }
+    return false;
+  }
+}
 
 int _compareBubbleTodos(TodoEntry a, TodoEntry b) {
   final completionOrder = (a.completedAt == null ? 0 : 1).compareTo(
@@ -341,6 +516,9 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _bubbleInputCaretLost = false;
   late bool _bubbleVisible;
   List<TodoEntry> _todos = const [];
+  _UpdateInfo? _updateInfo;
+  _UpdateStatus _updateStatus = _UpdateStatus.idle;
+  double _updateProgress = 0;
 
   @override
   void initState() {
@@ -358,6 +536,46 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _refreshTodos();
     _initializeTodoWatcher();
     _scheduleRandomNormalEnd();
+    unawaited(_checkForUpdates());
+  }
+
+  Future<void> _checkForUpdates() async {
+    if (!Platform.isWindows || _isFlutterTest) return;
+    final update = await _UpdateService.check();
+    if (!mounted || update == null) return;
+    final settings = await _PanelDataStore.load();
+    if (!mounted) return;
+    setState(() {
+      _updateInfo = update;
+      _updateStatus = _UpdateStatus.available;
+      _bubbleVisible = true;
+    });
+    if (settings.autoUpdate) unawaited(_downloadUpdate());
+  }
+
+  void _dismissUpdate() {
+    if (!mounted) return;
+    setState(() => _updateStatus = _UpdateStatus.idle);
+  }
+
+  Future<void> _downloadUpdate() async {
+    final update = _updateInfo;
+    if (update == null || _updateStatus == _UpdateStatus.downloading) return;
+    setState(() {
+      _updateStatus = _UpdateStatus.downloading;
+      _updateProgress = 0;
+    });
+    try {
+      final archive = await _UpdateService.download(update, (progress) {
+        if (mounted) setState(() => _updateProgress = progress.clamp(0, 1));
+      });
+      if (!mounted) return;
+      await _saveWindowPosition();
+      await _UpdateService.launchUpdater(archive);
+      exit(0);
+    } catch (_) {
+      if (mounted) setState(() => _updateStatus = _UpdateStatus.failed);
+    }
   }
 
   Future<void> _initialize() async {
@@ -663,6 +881,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
         exitTrayOnPetExit: current.exitTrayOnPetExit,
         skipTodoDeleteConfirmation: current.skipTodoDeleteConfirmation,
         bubbleVisibleByDefault: current.bubbleVisibleByDefault,
+        autoUpdate: current.autoUpdate,
       ),
     );
     if (mounted) {
@@ -1325,6 +1544,11 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
                             onMenu: _showBubbleTodoMenu,
                             onEdit: _renameBubbleTodo,
                             onEditFocusChanged: _handleBubbleEditFocus,
+                            updateInfo: _updateInfo,
+                            updateStatus: _updateStatus,
+                            updateProgress: _updateProgress,
+                            onUpdateNow: _downloadUpdate,
+                            onUpdateDismissed: _dismissUpdate,
                           ),
                           Positioned(
                             top: 0,
@@ -1579,6 +1803,11 @@ class _TodoSpeechBubble extends StatefulWidget {
     required this.onMenu,
     required this.onEdit,
     required this.onEditFocusChanged,
+    required this.updateInfo,
+    required this.updateStatus,
+    required this.updateProgress,
+    required this.onUpdateNow,
+    required this.onUpdateDismissed,
   });
 
   final double height;
@@ -1593,6 +1822,11 @@ class _TodoSpeechBubble extends StatefulWidget {
   final void Function(TodoEntry, Offset) onMenu;
   final Future<void> Function(TodoEntry, String) onEdit;
   final ValueChanged<bool> onEditFocusChanged;
+  final _UpdateInfo? updateInfo;
+  final _UpdateStatus updateStatus;
+  final double updateProgress;
+  final VoidCallback onUpdateNow;
+  final VoidCallback onUpdateDismissed;
 
   @override
   State<_TodoSpeechBubble> createState() => _TodoSpeechBubbleState();
@@ -1602,6 +1836,12 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
   final _editController = TextEditingController();
   final _editFocusNode = FocusNode();
   int? _editingTodoId;
+
+  _UpdateInfo? get updateInfo => widget.updateInfo;
+  _UpdateStatus get updateStatus => widget.updateStatus;
+  double get updateProgress => widget.updateProgress;
+  VoidCallback get onUpdateNow => widget.onUpdateNow;
+  VoidCallback get onUpdateDismissed => widget.onUpdateDismissed;
 
   List<TodoEntry> get todos => widget.todos;
   TextEditingController get controller => widget.controller;
@@ -1763,8 +2003,23 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                     ),
                   ),
                   const SizedBox(height: 16),
+                  if (updateStatus != _UpdateStatus.idle)
+                    _UpdateNotice(
+                      info: updateInfo,
+                      status: updateStatus,
+                      progress: updateProgress,
+                      onUpdateNow: onUpdateNow,
+                      onDismissed: onUpdateDismissed,
+                    ),
+                  if (updateStatus != _UpdateStatus.idle)
+                    const SizedBox(height: 12),
                   SizedBox(
-                    height: max(0.0, widget.height - 118),
+                    height: max(
+                      0.0,
+                      widget.height -
+                          118 -
+                          (updateStatus == _UpdateStatus.idle ? 0 : 74),
+                    ),
                     child: ScrollConfiguration(
                       behavior: ScrollConfiguration.of(
                         context,
@@ -1862,6 +2117,105 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _UpdateNotice extends StatelessWidget {
+  const _UpdateNotice({
+    required this.info,
+    required this.status,
+    required this.progress,
+    required this.onUpdateNow,
+    required this.onDismissed,
+  });
+
+  final _UpdateInfo? info;
+  final _UpdateStatus status;
+  final double progress;
+  final VoidCallback onUpdateNow;
+  final VoidCallback onDismissed;
+
+  @override
+  Widget build(BuildContext context) {
+    final downloading = status == _UpdateStatus.downloading;
+    final failed = status == _UpdateStatus.failed;
+    final version = info?.version ?? '';
+    final title = downloading
+        ? '正在更新至 v$version'
+        : failed
+        ? '更新下载失败'
+        : '发现新版本 v$version';
+    final subtitle = downloading
+        ? '下载中 ${(progress * 100).round()}%'
+        : failed
+        ? '请检查网络后重试'
+        : '是否立即更新？';
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xfffff0f3),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xffffd5dc)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontFamily: 'Microsoft YaHei',
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Color(0xff4a4a4a),
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            subtitle,
+            style: const TextStyle(
+              fontFamily: 'Microsoft YaHei',
+              fontSize: 11,
+              color: Color(0xff8a6870),
+            ),
+          ),
+          if (downloading) ...[
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 5,
+                backgroundColor: const Color(0xffffdce2),
+                color: const Color(0xffff8fa4),
+              ),
+            ),
+          ] else ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton(
+                    onPressed: onDismissed,
+                    child: const Text('暂不更新'),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: onUpdateNow,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xffff8fa4),
+                      minimumSize: const Size.fromHeight(30),
+                    ),
+                    child: Text(failed ? '重试' : '立即更新'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
       ),
     );
   }
