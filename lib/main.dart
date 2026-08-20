@@ -145,7 +145,13 @@ class _UpdateService {
     await script.writeAsString(r'''
 param([string]$Archive, [string]$Executable, [int]$Pid)
 $ErrorActionPreference = 'Stop'
+$log = Join-Path ([IO.Path]::GetTempPath()) 'remielle-updater.log'
+function Write-UpdateLog([string]$Message) {
+  Add-Content -LiteralPath $log -Value (('[' + (Get-Date -Format o) + '] ') + $Message)
+}
+Write-UpdateLog "Updater started. Archive=$Archive Executable=$Executable PID=$Pid"
 while (Get-Process -Id $Pid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }
+Write-UpdateLog 'Main process exited.'
 $root = Split-Path -Parent $Executable
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('remielle-update-' + [guid]::NewGuid())
 $backup = $root + '.backup-' + [guid]::NewGuid()
@@ -162,15 +168,19 @@ try {
   } | Stop-Process -Force -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $root -Destination $backup -Force
   Move-Item -LiteralPath $temp -Destination $root -Force
-  Start-Process -FilePath $Executable
+  Write-UpdateLog "Installed update into $root"
+  Start-Process -FilePath $Executable -WorkingDirectory $root -WindowStyle Hidden
+  Write-UpdateLog 'Restart requested.'
   Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
 } catch {
+  Write-UpdateLog ('Update failed: ' + $_.Exception.Message)
   if (Test-Path -LiteralPath $backup) {
     if (Test-Path -LiteralPath $root) {
       Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     }
     Move-Item -LiteralPath $backup -Destination $root -Force
-    Start-Process -FilePath $Executable -ErrorAction SilentlyContinue
+    Start-Process -FilePath $Executable -WorkingDirectory $root -WindowStyle Hidden -ErrorAction SilentlyContinue
+    Write-UpdateLog 'Rollback restart requested.'
   }
 } finally {
   Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
@@ -178,18 +188,23 @@ try {
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
 ''');
-    await Process.start('powershell.exe', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-WindowStyle',
-      'Hidden',
-      '-File',
-      script.path,
-      archive.path,
-      Platform.resolvedExecutable,
-      pid.toString(),
-    ], mode: ProcessStartMode.detached);
+    await Process.start(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-File',
+        script.path,
+        archive.path,
+        Platform.resolvedExecutable,
+        pid.toString(),
+      ],
+      mode: ProcessStartMode.detached,
+      workingDirectory: Directory.systemTemp.path,
+    );
   }
 
   static bool _isNewer(String remote) {
