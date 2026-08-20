@@ -30,6 +30,9 @@ class FlutterWindow : public Win32Window {
 
  private:
   bool IsTextCaretActive() const;
+  void RequestCaretStateQuery();
+  void StartCaretStateQuery();
+  void PublishCaretState(bool active);
 
   static LRESULT CALLBACK FlutterViewSubclassProc(
       HWND window, UINT message, WPARAM wparam, LPARAM lparam,
@@ -48,6 +51,10 @@ class FlutterWindow : public Win32Window {
   bool caret_active_ = false;
   std::atomic<bool> caret_query_running_{false};
   std::atomic<bool> caret_query_cancelled_{false};
+  bool caret_query_dirty_ = false;
+  bool keyboard_activity_pending_ = false;
+  bool caret_query_result_active_ = false;
+  HWND caret_query_result_foreground_ = nullptr;
   std::thread caret_query_thread_;
 
   // The Flutter instance hosted by this window.

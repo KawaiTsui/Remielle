@@ -48,6 +48,12 @@ void main() {
     expect(animation.width, 257);
     expect(animation.height, 278);
     expect(animation.loop, isTrue);
+    expect(
+      tester
+          .widget<Transform>(find.byKey(const ValueKey('pet-animation-scale')))
+          .transform,
+      Matrix4.identity(),
+    );
   });
 
   testWidgets('单击和长按桌宠播放对应的一次性动画', (tester) async {
@@ -106,6 +112,25 @@ void main() {
       _petAnimation(tester, 'assets/animations/a.gif').asset,
       'assets/animations/a.gif',
     );
+  });
+
+  testWidgets('Ctrl 长按拖动可以等比调整人物大小', (tester) async {
+    await tester.pumpWidget(const RemielleApp());
+    final listener = find.byKey(const ValueKey('pet-pointer-listener'));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    final gesture = await tester.startGesture(tester.getCenter(listener));
+    await tester.pump(const Duration(milliseconds: 300));
+    await gesture.moveBy(const Offset(0, -80));
+    await tester.pump();
+    expect(
+      tester
+          .widget<Transform>(find.byKey(const ValueKey('pet-animation-scale')))
+          .transform
+          .getMaxScaleOnAxis(),
+      closeTo(1.4, 0.01),
+    );
+    await gesture.up();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
   });
 
   testWidgets('bubble input focus drives the busy animation', (tester) async {
@@ -192,6 +217,96 @@ void main() {
       'assets/animations/d.gif',
     );
     await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
+  });
+
+  testWidgets('caret health check requests an initial and periodic refresh', (
+    tester,
+  ) async {
+    var refreshCount = 0;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('remielle/system'),
+      (call) async {
+        if (call.method == 'requestCaretStateRefresh') refreshCount++;
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('remielle/system'),
+        null,
+      ),
+    );
+
+    await tester.pumpWidget(const RemielleApp());
+    await tester.pump();
+    expect(refreshCount, 1);
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(refreshCount, 2);
+  });
+
+  testWidgets('duplicate active samples do not extend the typing idle timer', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const RemielleApp());
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
+    await tester.pump(const Duration(seconds: 6));
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
+    await tester.pump(const Duration(milliseconds: 4100));
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
+  });
+
+  testWidgets('external caret loss does not interrupt local bubble input', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const RemielleApp());
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+  });
+
+  testWidgets('busy animation exits after the safety limit', (tester) async {
+    await tester.pumpWidget(const RemielleApp());
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+
+    // Keep the caret logically active and repeatedly reset its idle timer.
+    // The animation-level safety timer must still force the exit transition.
+    for (var i = 0; i < 3; i++) {
+      await tester.pump(const Duration(seconds: 4));
+      await _sendSystemEvent(tester, 'keyboardActivity');
+      await tester.pump();
+      expect(
+        _petAnimation(tester, 'assets/animations/d.gif').asset,
+        'assets/animations/d.gif',
+      );
+    }
+
+    await tester.pump(const Duration(milliseconds: 3100));
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
+    await tester.pump(const Duration(milliseconds: 1300));
+    expect(
+      _petAnimation(tester, 'assets/animations/a.gif').asset,
+      'assets/animations/a.gif',
+    );
   });
 
   testWidgets('控制面板可以添加 Todo', (tester) async {

@@ -13,6 +13,8 @@ namespace {
 
 std::atomic<ULONGLONG> g_last_keyboard_input_tick{0};
 std::atomic<bool> g_caret_event_pending{false};
+std::atomic<bool> g_foreground_change_pending{false};
+std::atomic<bool> g_keyboard_event_pending{false};
 HWND g_event_window = nullptr;
 constexpr UINT kCaretStateChangedMessage = WM_APP + 1;
 constexpr UINT kKeyboardActivityMessage = WM_APP + 2;
@@ -92,7 +94,7 @@ LRESULT CALLBACK KeyboardActivityHook(int code, WPARAM wparam, LPARAM lparam) {
       (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN)) {
     g_last_keyboard_input_tick.store(GetTickCount64(),
                                      std::memory_order_relaxed);
-    if (g_event_window) {
+    if (g_event_window && !g_keyboard_event_pending.exchange(true)) {
       PostMessage(g_event_window, kKeyboardActivityMessage, 0, 0);
     }
   }
@@ -106,14 +108,16 @@ void CALLBACK CaretWinEventProc(HWINEVENTHOOK hook, DWORD event, HWND window,
       object_id != OBJID_CARET) {
     return;
   }
+  if (event == EVENT_SYSTEM_FOREGROUND) {
+    g_foreground_change_pending.store(true);
+  }
   if (!g_event_window || g_caret_event_pending.exchange(true)) {
     return;
   }
   PostMessage(g_event_window, kCaretStateChangedMessage, 0, 0);
 }
 
-bool IsNativeTextCaretActive() {
-  const HWND foreground_window = GetForegroundWindow();
+bool IsNativeTextCaretActive(HWND foreground_window) {
   if (!foreground_window) {
     return false;
   }
@@ -173,12 +177,12 @@ bool IsAutomationDescendantOf(IUIAutomation* automation,
   return found_ancestor;
 }
 
-bool IsAutomationTextCaretActive(IUIAutomation* automation) {
+bool IsAutomationTextCaretActive(IUIAutomation* automation,
+                                 HWND foreground_window) {
   if (!automation) {
     return false;
   }
 
-  const HWND foreground_window = GetForegroundWindow();
   if (!foreground_window) {
     return false;
   }
@@ -338,6 +342,11 @@ bool FlutterWindow::OnCreate() {
               flutter::EncodableValue(GetKeyboardInputIdleMilliseconds()));
           return;
         }
+        if (call.method_name() == "requestCaretStateRefresh") {
+          RequestCaretStateQuery();
+          result->Success();
+          return;
+        }
         if (call.method_name() == "sendPetEvent") {
           const auto* event = std::get_if<std::string>(call.arguments());
           result->Success(flutter::EncodableValue(
@@ -366,8 +375,7 @@ bool FlutterWindow::OnCreate() {
   // window is shown. It is a no-op if the first frame hasn't completed yet.
   flutter_controller_->ForceRedraw();
   if (constrain_to_work_area_) {
-    g_caret_event_pending.store(true);
-    PostMessage(GetHandle(), kCaretStateChangedMessage, 0, 0);
+    RequestCaretStateQuery();
   }
 
   return true;
@@ -399,6 +407,9 @@ void FlutterWindow::OnDestroy() {
   if (g_event_window == GetHandle()) {
     g_event_window = nullptr;
   }
+  g_caret_event_pending.store(false);
+  g_foreground_change_pending.store(false);
+  g_keyboard_event_pending.store(false);
   system_channel_.reset();
   if (ui_automation_) {
     ui_automation_->Release();
@@ -412,8 +423,56 @@ void FlutterWindow::OnDestroy() {
 }
 
 bool FlutterWindow::IsTextCaretActive() const {
-  return IsNativeTextCaretActive() ||
-         IsAutomationTextCaretActive(ui_automation_);
+  const HWND foreground_window = GetForegroundWindow();
+  return IsNativeTextCaretActive(foreground_window) ||
+         IsAutomationTextCaretActive(ui_automation_, foreground_window);
+}
+
+void FlutterWindow::RequestCaretStateQuery() {
+  if (caret_query_running_.load()) {
+    caret_query_dirty_ = true;
+    return;
+  }
+  StartCaretStateQuery();
+}
+
+void FlutterWindow::StartCaretStateQuery() {
+  caret_query_dirty_ = false;
+  caret_query_running_.store(true);
+  caret_query_cancelled_.store(false);
+  if (caret_query_thread_.joinable()) {
+    caret_query_thread_.join();
+  }
+  const HWND foreground_window = GetForegroundWindow();
+  caret_query_thread_ = std::thread([this, foreground_window]() {
+    bool active = false;
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IUIAutomation* automation = nullptr;
+    if (!caret_query_cancelled_.load()) {
+      CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
+                       IID_PPV_ARGS(&automation));
+      active = IsNativeTextCaretActive(foreground_window) ||
+               IsAutomationTextCaretActive(automation, foreground_window);
+    }
+    if (automation) {
+      automation->Release();
+    }
+    CoUninitialize();
+    if (!caret_query_cancelled_.load()) {
+      caret_query_result_active_ = active;
+      caret_query_result_foreground_ = foreground_window;
+      PostMessage(GetHandle(), kCaretQueryResultMessage, 0, 0);
+    }
+  });
+}
+
+void FlutterWindow::PublishCaretState(bool active) {
+  caret_active_ = active;
+  if (system_channel_) {
+    system_channel_->InvokeMethod(
+        "caretStateChanged",
+        std::make_unique<flutter::EncodableValue>(active));
+  }
 }
 
 LRESULT
@@ -422,31 +481,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               LPARAM const lparam) noexcept {
   if (message == kCaretStateChangedMessage) {
     g_caret_event_pending.store(false);
-    if (caret_query_running_.exchange(true)) {
-      return 0;
+    if (g_foreground_change_pending.exchange(false) && caret_active_) {
+      PublishCaretState(false);
     }
-    caret_query_cancelled_.store(false);
-    if (caret_query_thread_.joinable()) {
-      caret_query_thread_.join();
-    }
-    caret_query_thread_ = std::thread([this]() {
-      bool active = false;
-      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-      IUIAutomation* automation = nullptr;
-      if (!caret_query_cancelled_.load()) {
-        CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
-                         IID_PPV_ARGS(&automation));
-        active = IsNativeTextCaretActive() ||
-                 IsAutomationTextCaretActive(automation);
-      }
-      if (automation) {
-        automation->Release();
-      }
-      CoUninitialize();
-      if (!caret_query_cancelled_.load()) {
-        PostMessage(GetHandle(), kCaretQueryResultMessage, active ? 1 : 0, 0);
-      }
-    });
+    RequestCaretStateQuery();
     return 0;
   }
   if (message == kCaretQueryResultMessage) {
@@ -454,11 +492,22 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       caret_query_thread_.join();
     }
     caret_query_running_.store(false);
-    caret_active_ = wparam != 0;
-    if (system_channel_) {
-      system_channel_->InvokeMethod(
-          "caretStateChanged",
-          std::make_unique<flutter::EncodableValue>(caret_active_));
+    const bool foreground_stable =
+        caret_query_result_foreground_ == GetForegroundWindow();
+    const bool result_is_current = foreground_stable && !caret_query_dirty_;
+    if (result_is_current) {
+      PublishCaretState(caret_query_result_active_);
+      if (keyboard_activity_pending_) {
+        if (caret_query_result_active_ && system_channel_) {
+          system_channel_->InvokeMethod("keyboardActivity", nullptr);
+        }
+        keyboard_activity_pending_ = false;
+      }
+    } else {
+      caret_query_dirty_ = true;
+    }
+    if (caret_query_dirty_) {
+      StartCaretStateQuery();
     }
     return 0;
   }
@@ -477,9 +526,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     }
   }
   if (message == kKeyboardActivityMessage) {
-    if (caret_active_ && system_channel_) {
-      system_channel_->InvokeMethod("keyboardActivity", nullptr);
-    }
+    g_keyboard_event_pending.store(false);
+    keyboard_activity_pending_ = true;
+    RequestCaretStateQuery();
     return 0;
   }
   if (constrain_to_work_area_ && message == WM_MOVING) {

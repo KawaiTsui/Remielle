@@ -79,6 +79,8 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   bool _inputSessionActive = false;
   int? _hoveredTodoId;
   int? _editingTodoId;
+  StreamSubscription<FileSystemEvent>? _todoFileWatcher;
+  Timer? _todoRefreshDebounce;
 
   @override
   void initState() {
@@ -87,6 +89,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     _todoFocusNode.addListener(_onInputFocusChanged);
     _editFocusNode.addListener(_onInputFocusChanged);
     _initializePanel();
+    _initializeTodoWatcher();
   }
 
   Future<void> _initializePanel() async {
@@ -112,6 +115,8 @@ class _ControlPanelPageState extends State<ControlPanelPage>
 
   @override
   void dispose() {
+    _todoFileWatcher?.cancel();
+    _todoRefreshDebounce?.cancel();
     windowManager.removeListener(this);
     _todoFocusNode.removeListener(_onInputFocusChanged);
     _editFocusNode.removeListener(_onInputFocusChanged);
@@ -120,6 +125,36 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     _todoController.dispose();
     _editController.dispose();
     super.dispose();
+  }
+
+  Future<void> _initializeTodoWatcher() async {
+    if (_isFlutterTest) return;
+    final file = _PanelDataStore._file;
+    await file.parent.create(recursive: true);
+    _todoFileWatcher = file.parent.watch().listen((event) {
+      if (!event.path.toLowerCase().endsWith('control_panel.json')) return;
+      _todoRefreshDebounce?.cancel();
+      _todoRefreshDebounce = Timer(
+        const Duration(milliseconds: 120),
+        _refreshTodosFromDisk,
+      );
+    });
+  }
+
+  Future<void> _refreshTodosFromDisk() async {
+    final data = await _PanelDataStore.load();
+    if (!mounted || _editingTodoId != null) return;
+    setState(() {
+      _todos
+        ..clear()
+        ..addAll(data.todos);
+      _nextTodoId =
+          _todos.fold<int>(
+            0,
+            (maxId, todo) => todo.id > maxId ? todo.id : maxId,
+          ) +
+          1;
+    });
   }
 
   void _onInputFocusChanged() {
@@ -169,6 +204,55 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         createdAt: DateTime.now(),
         clearCompletedAt: true,
       );
+    });
+    await _savePanelData();
+  }
+
+  Future<void> _dropTodo(
+    TodoEntry dragged,
+    DateTime day,
+    bool completed, {
+    TodoEntry? before,
+  }) async {
+    if (!_todos.any((todo) => todo.id == dragged.id)) return;
+    final targetDay = _startOfDay(day);
+    final targetItems =
+        _todos
+            .where(
+              (todo) =>
+                  (todo.completedAt != null) == completed &&
+                  _isSameDay(todo.createdAt, targetDay) &&
+                  todo.id != dragged.id,
+            )
+            .toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    var insertIndex = targetItems.length;
+    if (before != null) {
+      final index = targetItems.indexWhere((todo) => todo.id == before.id);
+      if (index >= 0) {
+        insertIndex = index;
+      }
+    }
+    final reordered = List<TodoEntry>.of(targetItems)
+      ..insert(
+        insertIndex,
+        dragged.copyWith(
+          completedAt: completed
+              ? (dragged.completedAt ?? DateTime.now())
+              : null,
+          clearCompletedAt: !completed,
+        ),
+      );
+    final updates = <int, TodoEntry>{};
+    for (var i = 0; i < reordered.length; i++) {
+      updates[reordered[i].id] = reordered[i].copyWith(
+        createdAt: targetDay.add(Duration(hours: 12, minutes: i)),
+      );
+    }
+    setState(() {
+      for (var i = 0; i < _todos.length; i++) {
+        _todos[i] = updates[_todos[i].id] ?? _todos[i];
+      }
     });
     await _savePanelData();
   }
@@ -317,6 +401,14 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     } else {
       _endInputSession();
     }
+    final latest = await _PanelDataStore.load();
+    if (mounted) {
+      setState(() {
+        _todos
+          ..clear()
+          ..addAll(latest.todos);
+      });
+    }
     await _savePanelData();
     if (!_isFlutterTest) {
       await _sendPetEvent('panelClosed');
@@ -422,7 +514,12 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       final todos = groups[day]!
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       children.add(
-        _buildTodoSectionHeader(_todoDayLabel(day, today), todos.length),
+        _buildTodoDropHeader(
+          _todoDayLabel(day, today),
+          todos.length,
+          day: day,
+          completed: false,
+        ),
       );
       if (todos.isEmpty) {
         children.add(const _TodoEmptyState('今天还没有待办事项'));
@@ -466,6 +563,19 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       }
     }
     if (completed == 0) {
+      children.add(
+        DragTarget<TodoEntry>(
+          onAcceptWithDetails: (details) =>
+              _dropTodo(details.data, today, true),
+          builder: (context, candidates, rejected) => SizedBox(
+            height: 16,
+            width: double.infinity,
+            child: candidates.isEmpty
+                ? null
+                : const ColoredBox(color: Color(0x220067c0)),
+          ),
+        ),
+      );
       children.add(const _TodoEmptyState('完成的 Todo 会自动归档到这里'));
     }
     return ListView(padding: EdgeInsets.zero, children: children);
@@ -529,6 +639,17 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     ],
   );
 
+  Widget _buildTodoDropHeader(
+    String title,
+    int count, {
+    required DateTime day,
+    required bool completed,
+  }) => DragTarget<TodoEntry>(
+    onAcceptWithDetails: (details) => _dropTodo(details.data, day, completed),
+    builder: (context, candidates, rejected) =>
+        _buildTodoSectionHeader(title, count),
+  );
+
   List<Widget> _withDividers(Iterable<Widget> rows) {
     final result = <Widget>[];
     for (final row in rows) {
@@ -552,110 +673,170 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     ),
   );
 
-  Widget _buildTodoRow(TodoEntry todo, {bool completed = false}) => MouseRegion(
-    key: ValueKey('todo-row-${todo.id}'),
-    cursor: SystemMouseCursors.basic,
-    onEnter: (_) => setState(() => _hoveredTodoId = todo.id),
-    onExit: (_) {
-      if (_hoveredTodoId == todo.id) setState(() => _hoveredTodoId = null);
-    },
-    child: GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onSecondaryTapDown: (details) =>
-          _showTodoMenu(todo, details.globalPosition),
-      child: AnimatedContainer(
-        key: ValueKey('todo-row-background-${todo.id}'),
-        duration: const Duration(milliseconds: 100),
-        color: _hoveredTodoId == todo.id
-            ? const Color(0xffe9e9e9)
-            : const Color(0xfff5f5f5),
-        height: 52,
-        child: Row(
-          children: [
-            Checkbox(
-              key: ValueKey('todo-checkbox-${todo.id}'),
-              value: completed,
-              onChanged: (_) =>
-                  completed ? _restoreTodo(todo) : _completeTodo(todo),
-            ),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (!completed && _editingTodoId == todo.id)
-                    SizedBox(
-                      height: 26,
-                      child: TextField(
-                        key: ValueKey('edit-todo-input-${todo.id}'),
-                        controller: _editController,
-                        focusNode: _editFocusNode,
-                        style: const TextStyle(fontSize: 14),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(horizontal: 8),
-                          constraints: BoxConstraints(
-                            minHeight: 26,
-                            maxHeight: 26,
+  Widget _buildTodoRow(TodoEntry todo, {bool completed = false}) => Column(
+    children: [
+      DragTarget<TodoEntry>(
+        onWillAcceptWithDetails: (details) => details.data.id != todo.id,
+        onAcceptWithDetails: (details) => _dropTodo(
+          details.data,
+          _startOfDay(todo.createdAt),
+          completed,
+          before: todo,
+        ),
+        builder: (context, candidates, rejected) => SizedBox(
+          height: 10,
+          width: double.infinity,
+          child: candidates.isEmpty
+              ? null
+              : const ColoredBox(color: Color(0x220067c0)),
+        ),
+      ),
+      LongPressDraggable<TodoEntry>(
+        data: todo,
+        delay: const Duration(milliseconds: 180),
+        feedback: Material(
+          color: Colors.transparent,
+          child: _todoDragFeedback(todo, completed),
+        ),
+        childWhenDragging: Opacity(
+          opacity: 0.35,
+          child: _buildTodoRowBody(todo, completed: completed),
+        ),
+        child: DragTarget<TodoEntry>(
+          onWillAcceptWithDetails: (details) => details.data.id != todo.id,
+          onAcceptWithDetails: (details) => _dropTodo(
+            details.data,
+            _startOfDay(todo.createdAt),
+            completed,
+            before: todo,
+          ),
+          builder: (context, candidates, rejected) =>
+              _buildTodoRowBody(todo, completed: completed),
+        ),
+      ),
+    ],
+  );
+
+  Widget _buildTodoRowBody(TodoEntry todo, {required bool completed}) =>
+      MouseRegion(
+        key: ValueKey('todo-row-${todo.id}'),
+        cursor: SystemMouseCursors.basic,
+        onEnter: (_) => setState(() => _hoveredTodoId = todo.id),
+        onExit: (_) {
+          if (_hoveredTodoId == todo.id) setState(() => _hoveredTodoId = null);
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onSecondaryTapDown: (details) =>
+              _showTodoMenu(todo, details.globalPosition),
+          child: AnimatedContainer(
+            key: ValueKey('todo-row-background-${todo.id}'),
+            duration: const Duration(milliseconds: 100),
+            color: _hoveredTodoId == todo.id
+                ? const Color(0xffe9e9e9)
+                : const Color(0xfff5f5f5),
+            constraints: const BoxConstraints(minHeight: 52),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Checkbox(
+                  key: ValueKey('todo-checkbox-${todo.id}'),
+                  value: completed,
+                  onChanged: (_) =>
+                      completed ? _restoreTodo(todo) : _completeTodo(todo),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (!completed && _editingTodoId == todo.id)
+                          TextField(
+                            key: ValueKey('edit-todo-input-${todo.id}'),
+                            controller: _editController,
+                            focusNode: _editFocusNode,
+                            style: const TextStyle(fontSize: 14),
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                            ),
+                            textInputAction: TextInputAction.done,
+                            minLines: 1,
+                            maxLines: null,
+                            onSubmitted: (_) => _finishEditing(),
+                          )
+                        else
+                          GestureDetector(
+                            key: ValueKey('todo-title-${todo.id}'),
+                            behavior: HitTestBehavior.opaque,
+                            onTap: completed ? null : () => _startEditing(todo),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                todo.title,
+                                softWrap: true,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: completed
+                                      ? const Color(0xff666666)
+                                      : const Color(0xff1a1a1a),
+                                  decoration: completed
+                                      ? TextDecoration.lineThrough
+                                      : TextDecoration.none,
+                                ),
+                              ),
+                            ),
+                          ),
+                        Text(
+                          _formatTodoCreatedDate(todo.createdAt),
+                          key: ValueKey('todo-created-date-${todo.id}'),
+                          style: const TextStyle(
+                            color: Color(0xff888888),
+                            fontSize: 10,
                           ),
                         ),
-                        textInputAction: TextInputAction.done,
-                        onSubmitted: (_) => _finishEditing(),
-                      ),
-                    )
-                  else
-                    GestureDetector(
-                      key: ValueKey('todo-title-${todo.id}'),
-                      behavior: HitTestBehavior.opaque,
-                      onTap: completed ? null : () => _startEditing(todo),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          todo.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: completed
-                                ? const Color(0xff666666)
-                                : const Color(0xff1a1a1a),
-                            decoration: completed
-                                ? TextDecoration.lineThrough
-                                : TextDecoration.none,
-                          ),
-                        ),
-                      ),
+                      ],
                     ),
-                  Text(
-                    _formatTodoCreatedDate(todo.createdAt),
-                    key: ValueKey('todo-created-date-${todo.id}'),
-                    style: const TextStyle(
-                      color: Color(0xff888888),
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            SizedBox.square(
-              dimension: 30,
-              child: IconButton(
-                key: ValueKey('delete-todo-${todo.id}'),
-                tooltip: '删除 Todo',
-                padding: EdgeInsets.zero,
-                style: IconButton.styleFrom(
-                  shape: const RoundedRectangleBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(2)),
                   ),
                 ),
-                onPressed: () => _requestDeleteTodo(todo),
-                icon: const Icon(Icons.remove, size: 17),
-              ),
+                SizedBox.square(
+                  dimension: 30,
+                  child: IconButton(
+                    key: ValueKey('delete-todo-${todo.id}'),
+                    tooltip: '删除 Todo',
+                    padding: EdgeInsets.zero,
+                    style: IconButton.styleFrom(
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(2)),
+                      ),
+                    ),
+                    onPressed: () => _requestDeleteTodo(todo),
+                    icon: const Icon(Icons.remove, size: 17),
+                  ),
+                ),
+                const SizedBox(width: 4),
+              ],
             ),
-            const SizedBox(width: 4),
-          ],
+          ),
         ),
+      );
+
+  Widget _todoDragFeedback(TodoEntry todo, bool completed) => Container(
+    width: 420,
+    height: 52,
+    padding: const EdgeInsets.symmetric(horizontal: 12),
+    color: const Color(0xffe9e9e9),
+    alignment: Alignment.centerLeft,
+    child: Text(
+      todo.title,
+      style: TextStyle(
+        fontSize: 14,
+        color: completed ? const Color(0xff777777) : const Color(0xff1a1a1a),
       ),
     ),
   );
