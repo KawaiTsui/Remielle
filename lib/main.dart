@@ -143,14 +143,14 @@ class _UpdateService {
       '${Directory.systemTemp.path}\\remielle-updater-${DateTime.now().microsecondsSinceEpoch}.ps1',
     );
     await script.writeAsString(r'''
-param([string]$Archive, [string]$Executable, [int]$Pid)
+param([string]$Archive, [string]$Executable, [int]$ProcessId)
 $ErrorActionPreference = 'Stop'
 $log = Join-Path ([IO.Path]::GetTempPath()) 'remielle-updater.log'
 function Write-UpdateLog([string]$Message) {
   Add-Content -LiteralPath $log -Value (('[' + (Get-Date -Format o) + '] ') + $Message)
 }
-Write-UpdateLog "Updater started. Archive=$Archive Executable=$Executable PID=$Pid"
-while (Get-Process -Id $Pid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }
+Write-UpdateLog "Updater started. Archive=$Archive Executable=$Executable PID=$ProcessId"
+while (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }
 Write-UpdateLog 'Main process exited.'
 $root = Split-Path -Parent $Executable
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('remielle-update-' + [guid]::NewGuid())
@@ -171,9 +171,11 @@ try {
   Write-UpdateLog "Installed update into $root"
   Start-Process -FilePath $Executable -WorkingDirectory $root -WindowStyle Hidden
   Write-UpdateLog 'Restart requested.'
+  Set-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'remielle-update-success.marker') -Value 'success'
   Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
 } catch {
   Write-UpdateLog ('Update failed: ' + $_.Exception.Message)
+  Set-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'remielle-update-failed.marker') -Value $_.Exception.Message
   if (Test-Path -LiteralPath $backup) {
     if (Test-Path -LiteralPath $root) {
       Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
