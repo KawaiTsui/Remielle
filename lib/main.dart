@@ -23,6 +23,15 @@ const _minPetScale = 0.5;
 const _maxPetScale = 2.0;
 const _petScalePerDragPixel = 0.005;
 
+int _compareBubbleTodos(TodoEntry a, TodoEntry b) {
+  final completionOrder = (a.completedAt == null ? 0 : 1).compareTo(
+    b.completedAt == null ? 0 : 1,
+  );
+  return completionOrder != 0
+      ? completionOrder
+      : a.createdAt.compareTo(b.createdAt);
+}
+
 class _BubbleScrollPhysics extends ClampingScrollPhysics {
   const _BubbleScrollPhysics({super.parent});
 
@@ -235,6 +244,8 @@ const _animationOffsets = <String, Offset>{
 const _systemChannel = MethodChannel('remielle/system');
 const _caretIdleLimit = Duration(seconds: 10);
 const _caretHealthCheckInterval = Duration(seconds: 3);
+const _localCaretLossConfirmDelay = Duration(milliseconds: 450);
+
 // A stale native caret state must not keep the looping busy animation alive
 // indefinitely. Keyboard/focus events still drive normal transitions; this is
 // only a final animation-level safety net.
@@ -289,6 +300,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _alwaysOnTop = true;
   Timer? _randomNormalTimer;
   Timer? _caretIdleTimer;
+  Timer? _localCaretLossTimer;
   Timer? _caretHealthCheckTimer;
   StreamSubscription<FileSystemEvent>? _todoFileWatcher;
   Timer? _todoRefreshDebounce;
@@ -326,6 +338,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _requestingCaretRefresh = false;
   bool _bubbleInputActive = false;
   bool _bubbleEditInputActive = false;
+  bool _bubbleInputCaretLost = false;
   late bool _bubbleVisible;
   List<TodoEntry> _todos = const [];
 
@@ -378,6 +391,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   void dispose() {
     _randomNormalTimer?.cancel();
     _caretIdleTimer?.cancel();
+    _localCaretLossTimer?.cancel();
     _caretHealthCheckTimer?.cancel();
     _longPressTimer?.cancel();
     _animationCompletionTimer?.cancel();
@@ -624,7 +638,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final now = DateTime.now();
     final visibleTodos =
         data.todos.where((todo) => _isSameDay(todo.createdAt, now)).toList()
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+          ..sort(_compareBubbleTodos);
     final next = List<TodoEntry>.unmodifiable(visibleTodos);
     if (_todos.length == next.length &&
         _todos.asMap().entries.every(
@@ -656,7 +670,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       setState(() {
         final visibleTodos =
             todos.where((todo) => _isSameDay(todo.createdAt, now)).toList()
-              ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+              ..sort(_compareBubbleTodos);
         _todos = List.unmodifiable(visibleTodos);
       });
     }
@@ -830,10 +844,14 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     if (!mounted) return;
     _bubbleEditInputActive = active;
     if (active) {
+      _localCaretLossTimer?.cancel();
+      _bubbleInputCaretLost = false;
       if (!_windowDragging && _animation != _PetAnimation.busy) {
         _playAnimation(_PetAnimation.busy);
       }
     } else if (!_bubbleInputActive && !_systemCaretActive && !_windowDragging) {
+      _localCaretLossTimer?.cancel();
+      _bubbleInputCaretLost = false;
       _playAnimation(_PetAnimation.busyEnd);
     }
   }
@@ -927,10 +945,16 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     if (active == _bubbleInputActive) return;
     _bubbleInputActive = active;
     if (active) {
+      _localCaretLossTimer?.cancel();
+      _bubbleInputCaretLost = false;
       if (!_windowDragging && _animation != _PetAnimation.busy) {
         _playAnimation(_PetAnimation.busy);
       }
-    } else if (!_systemCaretActive && !_windowDragging) {
+    } else if (!_bubbleEditInputActive &&
+        !_systemCaretActive &&
+        !_windowDragging) {
+      _localCaretLossTimer?.cancel();
+      _bubbleInputCaretLost = false;
       _playAnimation(_PetAnimation.busyEnd);
     }
   }
@@ -940,6 +964,13 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     if (!active) {
       _caretIdleTimer?.cancel();
       _caretIdleTimer = null;
+      if (_bubbleInputActive || _bubbleEditInputActive) {
+        if (_bubbleInputCaretLost) {
+          return;
+        }
+        _confirmLocalCaretLossLater();
+        return;
+      }
       if (!_systemCaretActive) return;
       _systemCaretActive = false;
       final wasIdleSuppressed = _caretIdleSuppressed;
@@ -952,6 +983,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       }
       return;
     }
+    _localCaretLossTimer?.cancel();
+    _bubbleInputCaretLost = false;
     if (_systemCaretActive) return;
     _systemCaretActive = true;
     _caretIdleSuppressed = false;
@@ -959,6 +992,22 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     if (!_windowDragging && _animation != _PetAnimation.busy) {
       _playAnimation(_PetAnimation.busy);
     }
+  }
+
+  void _confirmLocalCaretLossLater() {
+    if (_localCaretLossTimer?.isActive ?? false) {
+      return;
+    }
+    _localCaretLossTimer = Timer(_localCaretLossConfirmDelay, () {
+      _localCaretLossTimer = null;
+      if (!mounted || (!_bubbleInputActive && !_bubbleEditInputActive)) {
+        return;
+      }
+      _bubbleInputCaretLost = true;
+      _systemCaretActive = false;
+      _caretIdleSuppressed = false;
+      _playAnimation(_PetAnimation.busyEnd);
+    });
   }
 
   void _handleKeyboardActivity() {
@@ -1194,8 +1243,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _animationCompletionTimer?.cancel();
     _animationCompletionTimer = null;
     if ((_systemCaretActive && !_caretIdleSuppressed) ||
-        _bubbleInputActive ||
-        _bubbleEditInputActive) {
+        (_bubbleInputActive && !_bubbleInputCaretLost) ||
+        (_bubbleEditInputActive && !_bubbleInputCaretLost)) {
       _playAnimation(_PetAnimation.busy);
       return;
     }
@@ -1890,6 +1939,17 @@ class _TodoBubbleRow extends StatelessWidget {
             },
             builder: (context, candidates, rejected) =>
                 SizedBox(key: targetKey, child: _buildRow(context)),
+          ),
+        ),
+        DragTarget<TodoEntry>(
+          onWillAcceptWithDetails: (details) => details.data.id != todo.id,
+          onAcceptWithDetails: (details) => onReorder(details.data, todo, true),
+          builder: (context, candidates, rejected) => SizedBox(
+            height: 10,
+            width: double.infinity,
+            child: candidates.isEmpty
+                ? null
+                : const ColoredBox(color: Color(0x22ff8fa4)),
           ),
         ),
       ],

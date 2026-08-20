@@ -29,7 +29,7 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
-  bool IsTextCaretActive() const;
+  bool IsTextCaretActive();
   void RequestCaretStateQuery();
   void StartCaretStateQuery();
   void PublishCaretState(bool active);

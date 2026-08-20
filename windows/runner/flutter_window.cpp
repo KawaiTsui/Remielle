@@ -189,7 +189,7 @@ bool IsAutomationTextCaretActive(IUIAutomation* automation,
 
   IUIAutomationElement* foreground_element = nullptr;
   if (FAILED(
-          automation->ElementFromHandle(foreground_window, &foreground_element)) ||
+      automation->ElementFromHandle(foreground_window, &foreground_element)) ||
       !foreground_element) {
     return false;
   }
@@ -232,12 +232,13 @@ bool IsAutomationTextCaretActive(IUIAutomation* automation,
     }
     text_pattern->Release();
     if (SUCCEEDED(caret_result)) {
-      if (caret_active != FALSE) {
-        const bool foreground_stable =
-            GetForegroundWindow() == foreground_window;
-        focused_element->Release();
-        return foreground_stable;
-      }
+      // GetCaretRange is authoritative when the focused control exposes
+      // TextPattern2. An editable control can retain keyboard focus after
+      // its caret has disappeared, so do not fall through and report it as
+      // active in that state.
+      const bool foreground_stable = GetForegroundWindow() == foreground_window;
+      focused_element->Release();
+      return foreground_stable && caret_active != FALSE;
     }
   }
 
@@ -422,10 +423,11 @@ void FlutterWindow::OnDestroy() {
   Win32Window::OnDestroy();
 }
 
-bool FlutterWindow::IsTextCaretActive() const {
+bool FlutterWindow::IsTextCaretActive() {
   const HWND foreground_window = GetForegroundWindow();
   return IsNativeTextCaretActive(foreground_window) ||
-         IsAutomationTextCaretActive(ui_automation_, foreground_window);
+         (foreground_window != GetHandle() &&
+          IsAutomationTextCaretActive(ui_automation_, foreground_window));
 }
 
 void FlutterWindow::RequestCaretStateQuery() {
@@ -444,7 +446,9 @@ void FlutterWindow::StartCaretStateQuery() {
     caret_query_thread_.join();
   }
   const HWND foreground_window = GetForegroundWindow();
-  caret_query_thread_ = std::thread([this, foreground_window]() {
+  const bool foreground_is_pet_window = foreground_window == GetHandle();
+  caret_query_thread_ =
+      std::thread([this, foreground_window, foreground_is_pet_window]() {
     bool active = false;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IUIAutomation* automation = nullptr;
@@ -452,7 +456,8 @@ void FlutterWindow::StartCaretStateQuery() {
       CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
                        IID_PPV_ARGS(&automation));
       active = IsNativeTextCaretActive(foreground_window) ||
-               IsAutomationTextCaretActive(automation, foreground_window);
+               (!foreground_is_pet_window &&
+                IsAutomationTextCaretActive(automation, foreground_window));
     }
     if (automation) {
       automation->Release();

@@ -52,7 +52,7 @@ class ControlPanelApp extends StatelessWidget {
   );
 }
 
-enum _PanelSection { todo, settings }
+enum _PanelSection { todo, settings, help }
 
 class ControlPanelPage extends StatefulWidget {
   const ControlPanelPage({super.key});
@@ -213,6 +213,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     DateTime day,
     bool completed, {
     TodoEntry? before,
+    TodoEntry? after,
   }) async {
     if (!_todos.any((todo) => todo.id == dragged.id)) return;
     final targetDay = _startOfDay(day);
@@ -232,6 +233,9 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       if (index >= 0) {
         insertIndex = index;
       }
+    } else if (after != null) {
+      final index = targetItems.indexWhere((todo) => todo.id == after.id);
+      if (index >= 0) insertIndex = index + 1;
     }
     final reordered = List<TodoEntry>.of(targetItems)
       ..insert(
@@ -430,9 +434,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         ),
         const VerticalDivider(width: 1, thickness: 1, color: Color(0xffd6d6d6)),
         Expanded(
-          child: _section == _PanelSection.todo
-              ? _buildTodoPage()
-              : _buildSettingsPage(),
+          child: switch (_section) {
+            _PanelSection.todo => _buildTodoPage(),
+            _PanelSection.settings => _buildSettingsPage(),
+            _PanelSection.help => _buildHelpPage(),
+          },
         ),
       ],
     ),
@@ -714,6 +720,22 @@ class _ControlPanelPageState extends State<ControlPanelPage>
               _buildTodoRowBody(todo, completed: completed),
         ),
       ),
+      DragTarget<TodoEntry>(
+        onWillAcceptWithDetails: (details) => details.data.id != todo.id,
+        onAcceptWithDetails: (details) => _dropTodo(
+          details.data,
+          _startOfDay(todo.createdAt),
+          completed,
+          after: todo,
+        ),
+        builder: (context, candidates, rejected) => SizedBox(
+          height: 10,
+          width: double.infinity,
+          child: candidates.isEmpty
+              ? null
+              : const ColoredBox(color: Color(0x220067c0)),
+        ),
+      ),
     ],
   );
 
@@ -887,6 +909,79 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       ],
     ),
   );
+
+  Future<void> _openGitHubRepository() async {
+    const url = 'https://github.com/KawaiTsui/Remielle';
+    try {
+      if (!Platform.isWindows) return;
+      await Process.start('explorer.exe', [
+        url,
+      ], mode: ProcessStartMode.detached);
+    } on ProcessException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('无法打开 GitHub 仓库。')));
+    }
+  }
+
+  Widget _buildHelpPage() => Padding(
+    key: const ValueKey('help-page'),
+    padding: const EdgeInsets.fromLTRB(36, 30, 36, 28),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _PageHeader(title: '使用说明', subtitle: 'Remielle 操作指南'),
+        const SizedBox(height: 24),
+        Expanded(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              const _HelpSection(
+                icon: Icons.touch_app_outlined,
+                title: '桌宠操作',
+                items: [
+                  '按住桌宠并拖动，可以移动桌宠窗口。',
+                  '按住 Ctrl 后在桌宠上长按鼠标左键并上下拖动，可以在 50% 至 200% 之间等比缩放。',
+                  '右键桌宠可打开菜单，使用控制面板、鼠标穿透、置顶、恢复 100% 大小和退出功能。',
+                ],
+              ),
+              const _HelpSection(
+                icon: Icons.chat_bubble_outline,
+                title: '气泡窗口',
+                items: [
+                  '在底部输入内容后按 Enter、点击加号或点击气泡空白处，即可添加 Todo。',
+                  '点击圆形勾选框可切换完成状态；已完成的 Todo 会自动排列到底部。',
+                  '长按 Todo 并拖到目标条目的上方或下方，可以调整排序。',
+                  '点击 Todo 文字可以编辑；右键 Todo 可以打开更多操作。',
+                  '拖动气泡窗口上边缘或上方两角可以调整高度；位置和大小会在退出时保存。',
+                ],
+              ),
+              const _HelpSection(
+                icon: Icons.view_list_outlined,
+                title: '控制面板',
+                items: [
+                  'Todo 页可添加、编辑、完成、恢复或删除事项，长内容会自动换行。',
+                  '长按并拖动 Todo，可以调整顺序，也可以跨日期或在未完成与已完成区域之间移动。',
+                  '设置页可管理开机启动、默认显示气泡、退出行为和删除确认。',
+                ],
+              ),
+              const Divider(height: 32, color: Color(0xffd6d6d6)),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  key: const ValueKey('github-repository-link'),
+                  onPressed: _openGitHubRepository,
+                  icon: const Icon(Icons.open_in_new, size: 17),
+                  label: const Text('GitHub：KawaiTsui/Remielle'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 class _NavigationPane extends StatelessWidget {
@@ -928,9 +1023,86 @@ class _NavigationPane extends StatelessWidget {
               selected: selected == _PanelSection.settings,
               onTap: () => onSelected(_PanelSection.settings),
             ),
+            const SizedBox(height: 4),
+            _NavigationItem(
+              key: const ValueKey('help-tab'),
+              icon: Icons.help_outline,
+              label: '使用说明',
+              selected: selected == _PanelSection.help,
+              onTap: () => onSelected(_PanelSection.help),
+            ),
           ],
         ),
       ),
+    ),
+  );
+}
+
+class _HelpSection extends StatelessWidget {
+  const _HelpSection({
+    required this.icon,
+    required this.title,
+    required this.items,
+  });
+
+  final IconData icon;
+  final String title;
+  final List<String> items;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 22),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 20, color: const Color(0xff0067c0)),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              for (final item in items)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(top: 7),
+                        child: SizedBox.square(
+                          dimension: 4,
+                          child: ColoredBox(color: Color(0xff737373)),
+                        ),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text(
+                          item,
+                          style: const TextStyle(
+                            height: 1.45,
+                            fontSize: 13,
+                            color: Color(0xff4f4f4f),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
     ),
   );
 }

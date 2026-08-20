@@ -275,6 +275,67 @@ void main() {
     );
   });
 
+  testWidgets(
+    'local bubble caret loss exits busy animation after confirmation',
+    (tester) async {
+      await tester.pumpWidget(const RemielleApp());
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
+      await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
+      await tester.pump(const Duration(milliseconds: 449));
+      expect(
+        _petAnimation(tester, 'assets/animations/d.gif').asset,
+        'assets/animations/d.gif',
+      );
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(
+        _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+        'assets/animations/d_win.gif',
+      );
+      await tester.pump(const Duration(milliseconds: 1300));
+      expect(
+        _petAnimation(tester, 'assets/animations/a.gif').asset,
+        'assets/animations/a.gif',
+      );
+    },
+  );
+
+  testWidgets('local bubble caret recovery cancels loss confirmation', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const RemielleApp());
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
+    await tester.pump(const Duration(milliseconds: 200));
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+  });
+
+  testWidgets('confirmed local caret loss is not reactivated by a refresh', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const RemielleApp());
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
+    await tester.pump(const Duration(milliseconds: 1300));
+    expect(
+      _petAnimation(tester, 'assets/animations/a.gif').asset,
+      'assets/animations/a.gif',
+    );
+  });
+
   testWidgets('busy animation exits after the safety limit', (tester) async {
     await tester.pumpWidget(const RemielleApp());
     await tester.pump();
@@ -414,6 +475,33 @@ void main() {
     expect(find.text('开机启动'), findsOneWidget);
     expect(find.text('退出时同时退出托盘'), findsOneWidget);
     expect(find.text('删除 Todo 时不再二次提醒'), findsOneWidget);
+  });
+
+  testWidgets('控制面板使用说明页显示操作指南和 GitHub 链接', (tester) async {
+    await tester.pumpWidget(const ControlPanelApp());
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('help-tab')));
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('help-page')), findsOneWidget);
+    expect(find.text('使用说明'), findsWidgets);
+    expect(find.text('桌宠操作'), findsOneWidget);
+    expect(find.text('气泡窗口'), findsOneWidget);
+    expect(find.text('控制面板'), findsOneWidget);
+    await tester.drag(
+      find.descendant(
+        of: find.byKey(const ValueKey('help-page')),
+        matching: find.byType(ListView),
+      ),
+      const Offset(0, -600),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('github-repository-link')),
+      findsOneWidget,
+    );
+    expect(find.text('GitHub：KawaiTsui/Remielle'), findsOneWidget);
   });
 
   testWidgets('减号按钮删除 Todo 前需要确认', (tester) async {
