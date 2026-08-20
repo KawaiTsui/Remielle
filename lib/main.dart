@@ -17,12 +17,12 @@ const _petStageWidth = 341.0;
 const _petStageHeight = 298.0;
 const _petBubbleGap = 20.0;
 const _petBubbleWidth = 300.0;
-const _petBubbleMinHeight = 220.0;
+const _petBubbleMinHeight = 270.0;
 const _petBubbleTailHeight = 10.0;
 const _minPetScale = 0.5;
 const _maxPetScale = 2.0;
 const _petScalePerDragPixel = 0.005;
-const _remielleVersion = '1.0.1';
+const _remielleVersion = '1.0.2';
 const _githubRepository = 'KawaiTsui/Remielle';
 
 enum _UpdateStatus { idle, available, downloading, failed }
@@ -2013,13 +2013,7 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                     ),
                   if (updateStatus != _UpdateStatus.idle)
                     const SizedBox(height: 12),
-                  SizedBox(
-                    height: max(
-                      0.0,
-                      widget.height -
-                          118 -
-                          (updateStatus == _UpdateStatus.idle ? 0 : 74),
-                    ),
+                  Expanded(
                     child: ScrollConfiguration(
                       behavior: ScrollConfiguration.of(
                         context,
@@ -2072,7 +2066,7 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                               textInputAction: TextInputAction.done,
                               style: const TextStyle(
                                 fontFamily: 'Microsoft YaHei',
-                                fontSize: 11,
+                                fontSize: 12,
                                 color: Color(0xff4a4a4a),
                               ),
                               decoration: const InputDecoration(
