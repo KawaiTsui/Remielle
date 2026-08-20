@@ -19,7 +19,7 @@
 
 前往 [Releases](../../releases) 下载最新版本：
 
-- `remielle-windows-x64-v1.0.0.rar`
+- `remielle-windows-x64-v1.0.1.rar`
 
 ## 使用方法
 
