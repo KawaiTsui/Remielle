@@ -25,6 +25,20 @@ const _petScalePerDragPixel = 0.005;
 const _remielleVersion = '1.0.2';
 const _githubRepository = 'KawaiTsui/Remielle';
 
+Future<void> _writeUpdateDebugLog(String message) async {
+  if (_isFlutterTest) return;
+  try {
+    final file = File(
+      '${Directory.systemTemp.path}\\remielle-update-debug.log',
+    );
+    await file.writeAsString(
+      '[${DateTime.now().toIso8601String()}] $message\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  } catch (_) {}
+}
+
 enum _UpdateStatus { idle, available, downloading, failed }
 
 class _UpdateInfo {
@@ -38,6 +52,7 @@ class _UpdateService {
       File('${Directory.systemTemp.path}\\remielle-same-version-update.marker');
 
   static Future<_UpdateInfo?> check() async {
+    await _writeUpdateDebugLog('check started; version=$_remielleVersion');
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
       final request = await client.getUrl(
@@ -51,6 +66,7 @@ class _UpdateService {
       final response = await request.close().timeout(
         const Duration(seconds: 12),
       );
+      await _writeUpdateDebugLog('check response=${response.statusCode}');
       if (response.statusCode != HttpStatus.ok) {
         return null;
       }
@@ -78,11 +94,16 @@ class _UpdateService {
         return null;
       }
       if (_isSameVersion(version) && await _sameVersionMarker.exists()) {
+        await _writeUpdateDebugLog(
+          'same-version marker consumed; version=$version',
+        );
         await _sameVersionMarker.delete();
         return null;
       }
+      await _writeUpdateDebugLog('update available; version=$version url=$url');
       return _UpdateInfo(version: version, downloadUrl: url);
-    } catch (_) {
+    } catch (error) {
+      await _writeUpdateDebugLog('check failed: $error');
       return null;
     } finally {
       client.close(force: true);
@@ -97,6 +118,9 @@ class _UpdateService {
     _UpdateInfo info,
     ValueChanged<double> progress,
   ) async {
+    await _writeUpdateDebugLog(
+      'download started; version=${info.version} url=${info.downloadUrl}',
+    );
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 10);
     try {
@@ -109,6 +133,7 @@ class _UpdateService {
         const Duration(seconds: 30),
       );
       if (response.statusCode != HttpStatus.ok) {
+        await _writeUpdateDebugLog('download response=${response.statusCode}');
         throw HttpException('download failed');
       }
       final file = File(
@@ -126,8 +151,12 @@ class _UpdateService {
         }
         await sink.close();
         progress(1);
+        await _writeUpdateDebugLog(
+          'download completed; file=${file.path} bytes=$received',
+        );
         return file;
-      } catch (_) {
+      } catch (error) {
+        await _writeUpdateDebugLog('download write failed: $error');
         try {
           await file.delete();
         } catch (_) {}
@@ -141,6 +170,9 @@ class _UpdateService {
   static Future<void> launchUpdater(File archive) async {
     final script = File(
       '${Directory.systemTemp.path}\\remielle-updater-${DateTime.now().microsecondsSinceEpoch}.ps1',
+    );
+    final launcher = File(
+      '${Directory.systemTemp.path}\\remielle-updater-${DateTime.now().microsecondsSinceEpoch}.cmd',
     );
     await script.writeAsString(r'''
 param([string]$Archive, [string]$Executable, [int]$ProcessId)
@@ -163,9 +195,13 @@ try {
     throw 'The update archive does not contain the application executable.'
   }
 
-  Get-Process | Where-Object {
+  $samePathProcesses = Get-Process | Where-Object {
     try { $_.Path -eq $Executable } catch { $false }
-  } | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+  Write-UpdateLog (('Same executable processes to close: ') + @($samePathProcesses).Count)
+  $samePathProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 500
+  Write-UpdateLog 'Control panel and other same-path processes closed.'
   Move-Item -LiteralPath $root -Destination $backup -Force
   Move-Item -LiteralPath $temp -Destination $root -Force
   Write-UpdateLog "Installed update into $root"
@@ -190,23 +226,27 @@ try {
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
 ''');
-    await Process.start(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-WindowStyle',
-        'Hidden',
-        '-File',
-        script.path,
-        archive.path,
-        Platform.resolvedExecutable,
-        pid.toString(),
-      ],
-      mode: ProcessStartMode.detached,
-      workingDirectory: Directory.systemTemp.path,
+    final quote = (String value) => '"${value.replaceAll('"', '""')}"';
+    await launcher.writeAsString(
+      '@echo off\r\n'
+      'start "" /b powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${quote(script.path)} ${quote(archive.path)} ${quote(Platform.resolvedExecutable)} ${pid}\r\n',
+      flush: true,
     );
+    await _writeUpdateDebugLog(
+      'launch updater; launcher=${launcher.path} script=${script.path} archive=${archive.path} executable=${Platform.resolvedExecutable} pid=$pid',
+    );
+    try {
+      await Process.start(
+        'cmd.exe',
+        ['/d', '/c', launcher.path],
+        mode: ProcessStartMode.detached,
+        workingDirectory: Directory.systemTemp.path,
+      );
+      await _writeUpdateDebugLog('updater process started');
+    } catch (error) {
+      await _writeUpdateDebugLog('updater process start failed: $error');
+      rethrow;
+    }
   }
 
   static bool _isNewer(String remote) {
@@ -605,6 +645,9 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   Future<void> _downloadUpdate() async {
     final update = _updateInfo;
     if (update == null || _updateStatus == _UpdateStatus.downloading) return;
+    await _writeUpdateDebugLog(
+      'download flow started; update=${update.version} current=$_remielleVersion mainPid=$pid panelPid=${_panelProcess?.pid ?? 'none'}',
+    );
     setState(() {
       _updateStatus = _UpdateStatus.downloading;
       _updateProgress = 0;
@@ -617,10 +660,15 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       await _saveWindowPosition();
       if (_UpdateService._isSameVersion(update.version)) {
         await _UpdateService.markSameVersionUpdate();
+        await _writeUpdateDebugLog('same-version marker written');
       }
       await _UpdateService.launchUpdater(archive);
+      await _writeUpdateDebugLog(
+        'requesting main process exit; panelPid=${_panelProcess?.pid ?? 'none'}',
+      );
       exit(0);
-    } catch (_) {
+    } catch (error) {
+      await _writeUpdateDebugLog('download flow failed: $error');
       if (mounted) setState(() => _updateStatus = _UpdateStatus.failed);
     }
   }
@@ -1521,14 +1569,19 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   Process? _panelProcess;
 
   Future<void> _openPanelWindow() async {
+    final log = File('${Directory.systemTemp.path}\\remielle-panel.log');
+    await log.writeAsString(
+      '[${DateTime.now().toIso8601String()}] tray panel request\n',
+      mode: FileMode.append,
+    );
     if (Platform.isWindows) {
       final existing = await _systemChannel.invokeMethod<bool>(
         'showExistingControlPanel',
       );
+      await log.writeAsString('existing=$existing\n', mode: FileMode.append);
       if (existing == true) return;
     }
     final executable = File(Platform.resolvedExecutable);
-    final log = File('${Directory.systemTemp.path}\\remielle-panel.log');
     try {
       await log.writeAsString(
         'launch=${executable.path}\nexists=${await executable.exists()}\n',

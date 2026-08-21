@@ -4,12 +4,22 @@
 #include <atomic>
 #include <commctrl.h>
 #include <cstdint>
+#include <fstream>
 #include <optional>
 #include <string>
 
 #include "flutter/generated_plugin_registrant.h"
 
 namespace {
+
+void WritePanelLog(const std::wstring& message) {
+  wchar_t temp_path[MAX_PATH] = {};
+  const DWORD length = GetTempPathW(MAX_PATH, temp_path);
+  if (length == 0 || length >= MAX_PATH) return;
+  std::wofstream log(std::wstring(temp_path) + L"remielle-panel.log",
+                     std::ios::app);
+  if (log) log << L"[native] " << message << std::endl;
+}
 
 std::atomic<ULONGLONG> g_last_keyboard_input_tick{0};
 std::atomic<bool> g_caret_event_pending{false};
@@ -80,6 +90,7 @@ BOOL CALLBACK FindControlPanelWindow(HWND window, LPARAM data) {
 bool ShowExistingControlPanel() {
   PetWindowSearchContext context{GetCurrentProcessId()};
   EnumWindows(FindControlPanelWindow, reinterpret_cast<LPARAM>(&context));
+  WritePanelLog(context.result ? L"existing panel found" : L"existing panel not found");
   if (!context.result) {
     return false;
   }
