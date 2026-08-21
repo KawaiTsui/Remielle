@@ -70,8 +70,7 @@ BOOL CALLBACK FindControlPanelWindow(HWND window, LPARAM data) {
   GetWindowTextW(window, title,
                  static_cast<int>(sizeof(title) / sizeof(title[0])));
   const std::wstring window_title(title);
-  if (window_title.find(L"Remielle") == std::wstring::npos ||
-      window_title == L"remielle") {
+  if (window_title != L"Remielle 控制面板") {
     return TRUE;
   }
   context->result = window;

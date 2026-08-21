@@ -32,7 +32,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project, is_control_panel, !is_control_panel);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"remielle", origin, size)) {
+  const wchar_t *window_title =
+      is_control_panel ? L"Remielle 控制面板" : L"remielle";
+  if (!window.Create(window_title, origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
