@@ -62,6 +62,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       system_channel_;
   IUIAutomation* ui_automation_ = nullptr;
+  HANDLE control_panel_job_ = nullptr;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

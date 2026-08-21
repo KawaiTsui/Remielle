@@ -151,6 +151,31 @@ void main() {
     );
   });
 
+  testWidgets('气泡 Todo 右键编辑会进入行内编辑并全选文字', (tester) async {
+    await tester.pumpWidget(const RemielleApp());
+    final input = find.byType(TextField);
+    await tester.enterText(input, '气泡右键编辑');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('气泡右键编辑'), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(PopupMenuItem<String>, '编辑'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsNothing);
+    final editInput = find.byKey(const ValueKey('bubble-edit-todo-1'));
+    final textField = tester.widget<TextField>(editInput);
+    expect(
+      textField.controller?.selection,
+      const TextSelection(baseOffset: 0, extentOffset: 6),
+    );
+    final selectionTheme = tester.widget<TextSelectionTheme>(
+      find.ancestor(of: editInput, matching: find.byType(TextSelectionTheme)),
+    );
+    expect(selectionTheme.data.selectionColor, const Color(0xffffb6c1));
+  });
+
   testWidgets('系统文本光标激活和结束时播放忙碌动画', (tester) async {
     await tester.pumpWidget(const RemielleApp());
     await tester.pump();
@@ -182,6 +207,24 @@ void main() {
     position = _petAnimationPosition(tester, 'assets/animations/a.gif');
     expect(position.transform.getTranslation().x, 0);
     expect(position.transform.getTranslation().y, 0);
+  });
+
+  testWidgets('全部完成后延迟显示庆祝状态并在五秒后恢复', (tester) async {
+    await tester.pumpWidget(const RemielleApp());
+    await tester.pump();
+
+    await _sendSystemEvent(tester, 'petEvent', arguments: 'allTodosCompleted');
+    await tester.pump(const Duration(milliseconds: 999));
+    expect(find.text('今天所有任务都完成啦~'), findsNothing);
+
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(find.text('今天所有任务都完成啦~'), findsOneWidget);
+    expect(find.text('辛苦了，休息一下吧 🌸'), findsOneWidget);
+    expect(find.byIcon(Icons.auto_awesome), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 5));
+    expect(find.text('今天所有任务都完成啦~'), findsNothing);
+    expect(find.text('今天没有待办哦~'), findsOneWidget);
   });
 
   testWidgets('光标激活但系统空闲 30 秒后回到待机', (tester) async {
@@ -374,6 +417,7 @@ void main() {
     await tester.pumpWidget(const ControlPanelApp());
     await tester.pump();
     final input = find.byKey(const ValueKey('todo-input'));
+    expect(tester.widget<TextField>(input).decoration?.hintText, isNull);
     for (var i = 1; i <= 5; i++) {
       await tester.enterText(input, '测试任务 $i');
       await tester.tap(find.byKey(const ValueKey('add-todo-button')));
@@ -382,6 +426,57 @@ void main() {
     await tester.drag(find.byType(ListView), const Offset(0, -240));
     await tester.pump();
     expect(find.text('测试任务 5'), findsOneWidget);
+  });
+
+  testWidgets('控制面板空 Todo 提交会结束输入状态', (tester) async {
+    Future<void> expectInputEnded() async {
+      await tester.pump();
+      final input = tester.widget<TextField>(
+        find.byKey(const ValueKey('todo-input')),
+      );
+      expect(input.focusNode?.hasFocus, isFalse);
+      expect(find.byKey(const ValueKey('todo-row-1')), findsNothing);
+    }
+
+    await tester.pumpWidget(const ControlPanelApp());
+    await tester.pump();
+    final input = find.byKey(const ValueKey('todo-input'));
+
+    await tester.tap(input);
+    await tester.pump();
+    expect(tester.widget<TextField>(input).focusNode?.hasFocus, isTrue);
+    final page = find.byKey(const ValueKey('todo-blank-add-area'));
+    await tester.tapAt(tester.getBottomRight(page) - const Offset(24, 24));
+    await expectInputEnded();
+
+    await tester.tap(input);
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('add-todo-button')));
+    await expectInputEnded();
+
+    await tester.tap(input);
+    await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await expectInputEnded();
+  });
+
+  testWidgets('气泡窗口空 Todo 提交会结束忙碌动画', (tester) async {
+    await tester.pumpWidget(const RemielleApp());
+    final input = find.byType(TextField);
+
+    await tester.tap(input);
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d.gif').asset,
+      'assets/animations/d.gif',
+    );
+
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
   });
 
   testWidgets('点击 Todo 页空白处可以完成添加', (tester) async {
@@ -401,8 +496,8 @@ void main() {
     await tester.pumpWidget(const ControlPanelApp());
     await tester.pump();
 
+    expect(find.text('待办清单'), findsOneWidget);
     expect(find.text('今日待办'), findsOneWidget);
-    expect(find.text('当天加入'), findsOneWidget);
     expect(find.text('已完成'), findsOneWidget);
     expect(find.text('完成的 Todo 会自动归档到这里'), findsOneWidget);
 
@@ -418,12 +513,20 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('todo-checkbox-1')));
     await tester.pump();
 
+    expect(find.text('归档任务'), findsNothing);
+    final now = DateTime.now();
+    final archiveDay =
+        '${now.year}/${now.month.toString().padLeft(2, '0')}/${now.day.toString().padLeft(2, '0')}';
+    await tester.tap(find.byKey(ValueKey('archive-day-$archiveDay')));
+    await tester.pump();
+
     checkbox = tester.widget<Checkbox>(
       find.byKey(const ValueKey('todo-checkbox-1')),
     );
     expect(checkbox.value, isTrue);
     final archivedTitle = tester.widget<Text>(find.text('归档任务'));
     expect(archivedTitle.style?.decoration, TextDecoration.lineThrough);
+    expect(find.byKey(const ValueKey('todo-created-date-1')), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('todo-checkbox-1')));
     await tester.pump();
@@ -479,6 +582,28 @@ void main() {
     expect(find.text('开机启动'), findsOneWidget);
     expect(find.text('退出时同时退出托盘'), findsOneWidget);
     expect(find.text('删除 Todo 时不再二次提醒'), findsOneWidget);
+    expect(find.text('桌宠启动时默认显示待办气泡'), findsOneWidget);
+    expect(find.text('系统设置'), findsNothing);
+    expect(find.byType(Divider), findsNothing);
+
+    final theme = Theme.of(
+      tester.element(find.byKey(const ValueKey('startup-switch'))),
+    );
+    expect(
+      theme.switchTheme.overlayColor?.resolve({WidgetState.hovered}),
+      Colors.transparent,
+    );
+    expect(
+      theme.checkboxTheme.overlayColor?.resolve({WidgetState.hovered}),
+      Colors.transparent,
+    );
+    final checkboxSide = theme.checkboxTheme.side as WidgetStateBorderSide;
+    expect(checkboxSide.resolve({})?.width, 1);
+    expect(checkboxSide.resolve({})?.color, const Color(0xffd1d5db));
+    expect(
+      checkboxSide.resolve({WidgetState.hovered})?.color,
+      const Color(0xff111111),
+    );
 
     await tester.tap(find.byKey(const ValueKey('auto-update-switch')));
     await tester.pump();
@@ -502,6 +627,8 @@ void main() {
     expect(find.text('桌宠操作'), findsOneWidget);
     expect(find.text('气泡窗口'), findsOneWidget);
     expect(find.text('控制面板'), findsOneWidget);
+    expect(find.text('Remielle 操作指南'), findsNothing);
+    expect(find.textContaining('已完成归档按日期默认折叠'), findsNothing);
     await tester.drag(
       find.descendant(
         of: find.byKey(const ValueKey('help-page')),
@@ -515,6 +642,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('GitHub：KawaiTsui/Remielle'), findsOneWidget);
+    expect(find.byKey(const ValueKey('github-icon')), findsOneWidget);
   });
 
   testWidgets('减号按钮删除 Todo 前需要确认', (tester) async {
@@ -528,6 +656,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('删除 Todo'), findsOneWidget);
     expect(find.text('确定要删除“待删除任务”吗？'), findsOneWidget);
+    final dialogTitle = tester.widget<Text>(find.text('删除 Todo'));
+    expect(dialogTitle.style?.fontFamily, 'Microsoft YaHei');
+    expect(dialogTitle.style?.fontWeight, FontWeight.bold);
+    final cancel = tester.widget<OutlinedButton>(find.byType(OutlinedButton));
+    expect(cancel.style?.side?.resolve({})?.width, 1);
+    expect(cancel.style?.side?.resolve({})?.color, const Color(0xff0078d4));
 
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
@@ -605,7 +739,7 @@ void main() {
     expect(
       (tester.widget<AnimatedContainer>(background).decoration as BoxDecoration)
           .color,
-      const Color(0xffe9e9e9),
+      const Color(0xfff3f4f6),
     );
 
     await mouse.moveTo(
@@ -615,7 +749,7 @@ void main() {
     expect(
       (tester.widget<AnimatedContainer>(background).decoration as BoxDecoration)
           .color,
-      const Color(0xfff5f5f5),
+      Colors.white,
     );
     await mouse.removePointer();
   });

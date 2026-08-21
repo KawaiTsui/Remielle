@@ -4,22 +4,12 @@
 #include <atomic>
 #include <commctrl.h>
 #include <cstdint>
-#include <fstream>
 #include <optional>
 #include <string>
 
 #include "flutter/generated_plugin_registrant.h"
 
 namespace {
-
-void WritePanelLog(const std::wstring& message) {
-  wchar_t temp_path[MAX_PATH] = {};
-  const DWORD length = GetTempPathW(MAX_PATH, temp_path);
-  if (length == 0 || length >= MAX_PATH) return;
-  std::wofstream log(std::wstring(temp_path) + L"remielle-panel.log",
-                     std::ios::app);
-  if (log) log << L"[native] " << message << std::endl;
-}
 
 std::atomic<ULONGLONG> g_last_keyboard_input_tick{0};
 std::atomic<bool> g_caret_event_pending{false};
@@ -87,16 +77,46 @@ BOOL CALLBACK FindControlPanelWindow(HWND window, LPARAM data) {
   return FALSE;
 }
 
-bool ShowExistingControlPanel() {
+HWND FindExistingControlPanel() {
   PetWindowSearchContext context{GetCurrentProcessId()};
   EnumWindows(FindControlPanelWindow, reinterpret_cast<LPARAM>(&context));
-  WritePanelLog(context.result ? L"existing panel found" : L"existing panel not found");
-  if (!context.result) {
-    return false;
+  return context.result;
+}
+
+bool ActivateExistingControlPanel() {
+  const HWND panel = FindExistingControlPanel();
+  if (!panel) return false;
+
+  const DWORD current_thread_id = GetCurrentThreadId();
+  const DWORD target_thread_id =
+      GetWindowThreadProcessId(panel, nullptr);
+  const HWND foreground_window = GetForegroundWindow();
+  const DWORD foreground_thread_id = foreground_window
+                                         ? GetWindowThreadProcessId(
+                                               foreground_window, nullptr)
+                                         : 0;
+  const bool attached_to_foreground =
+      foreground_thread_id != 0 &&
+      foreground_thread_id != current_thread_id &&
+      AttachThreadInput(current_thread_id, foreground_thread_id, TRUE);
+  const bool attached_to_target =
+      target_thread_id != 0 && target_thread_id != current_thread_id &&
+      AttachThreadInput(current_thread_id, target_thread_id, TRUE);
+
+  ShowWindowAsync(panel, SW_RESTORE);
+  SetWindowPos(panel, HWND_TOP, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  BringWindowToTop(panel);
+  const bool foreground_requested = SetForegroundWindow(panel) != FALSE;
+  SetFocus(panel);
+
+  if (attached_to_target) {
+    AttachThreadInput(current_thread_id, target_thread_id, FALSE);
   }
-  ShowWindow(context.result, SW_RESTORE);
-  SetForegroundWindow(context.result);
-  return true;
+  if (attached_to_foreground) {
+    AttachThreadInput(current_thread_id, foreground_thread_id, FALSE);
+  }
+  return foreground_requested && GetForegroundWindow() == panel;
 }
 
 LRESULT CALLBACK KeyboardActivityHook(int code, WPARAM wparam, LPARAM lparam) {
@@ -315,6 +335,20 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   if (constrain_to_work_area_) {
+    control_panel_job_ = CreateJobObjectW(nullptr, nullptr);
+    if (control_panel_job_) {
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+      limits.BasicLimitInformation.LimitFlags =
+          JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if (!SetInformationJobObject(control_panel_job_,
+                                   JobObjectExtendedLimitInformation, &limits,
+                                   sizeof(limits))) {
+        CloseHandle(control_panel_job_);
+        control_panel_job_ = nullptr;
+      }
+    }
+  }
+  if (constrain_to_work_area_) {
     g_last_keyboard_input_tick.store(GetTickCount64(),
                                      std::memory_order_relaxed);
     keyboard_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardActivityHook,
@@ -365,7 +399,34 @@ bool FlutterWindow::OnCreate() {
           return;
         }
         if (call.method_name() == "showExistingControlPanel") {
-          result->Success(flutter::EncodableValue(ShowExistingControlPanel()));
+          result->Success(
+              flutter::EncodableValue(ActivateExistingControlPanel()));
+          return;
+        }
+        if (call.method_name() == "hasExistingControlPanel") {
+          result->Success(
+              flutter::EncodableValue(FindExistingControlPanel() != nullptr));
+          return;
+        }
+        if (call.method_name() == "assignControlPanelToJob") {
+          DWORD process_id = 0;
+          if (const auto* pid_value =
+                         std::get_if<int32_t>(call.arguments())) {
+            process_id = static_cast<DWORD>(*pid_value);
+          } else if (const auto* pid_value64 =
+                         std::get_if<int64_t>(call.arguments())) {
+            process_id = static_cast<DWORD>(*pid_value64);
+          }
+          HANDLE process = process_id == 0
+                               ? nullptr
+                               : OpenProcess(PROCESS_SET_QUOTA |
+                                                 PROCESS_TERMINATE,
+                                             FALSE, process_id);
+          const bool assigned = control_panel_job_ && process &&
+                                AssignProcessToJobObject(control_panel_job_,
+                                                         process);
+          if (process) CloseHandle(process);
+          result->Success(flutter::EncodableValue(assigned));
           return;
         }
         result->NotImplemented();
@@ -428,6 +489,10 @@ void FlutterWindow::OnDestroy() {
   }
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
+  }
+  if (control_panel_job_) {
+    CloseHandle(control_panel_job_);
+    control_panel_job_ = nullptr;
   }
 
   Win32Window::OnDestroy();

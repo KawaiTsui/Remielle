@@ -22,22 +22,8 @@ const _petBubbleTailHeight = 10.0;
 const _minPetScale = 0.5;
 const _maxPetScale = 2.0;
 const _petScalePerDragPixel = 0.005;
-const _remielleVersion = '1.0.2';
+const _remielleVersion = '1.0.3';
 const _githubRepository = 'KawaiTsui/Remielle';
-
-Future<void> _writeUpdateDebugLog(String message) async {
-  if (_isFlutterTest) return;
-  try {
-    final file = File(
-      '${Directory.systemTemp.path}\\remielle-update-debug.log',
-    );
-    await file.writeAsString(
-      '[${DateTime.now().toIso8601String()}] $message\n',
-      mode: FileMode.append,
-      flush: true,
-    );
-  } catch (_) {}
-}
 
 enum _UpdateStatus { idle, available, downloading, failed }
 
@@ -48,13 +34,10 @@ class _UpdateInfo {
 }
 
 class _UpdateService {
-  static File get _sameVersionMarker =>
-      File('${Directory.systemTemp.path}\\remielle-same-version-update.marker');
+  static File get requestFile =>
+      File('${Directory.systemTemp.path}\\remielle-update-request.json');
 
-  static Future<_UpdateInfo?> check({
-    bool ignoreSameVersionMarker = false,
-  }) async {
-    await _writeUpdateDebugLog('check started; version=$_remielleVersion');
+  static Future<_UpdateInfo?> check() async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
       final request = await client.getUrl(
@@ -68,7 +51,6 @@ class _UpdateService {
       final response = await request.close().timeout(
         const Duration(seconds: 12),
       );
-      await _writeUpdateDebugLog('check response=${response.statusCode}');
       if (response.statusCode != HttpStatus.ok) {
         return null;
       }
@@ -95,36 +77,51 @@ class _UpdateService {
       if (url is! String || !_isNewer(version)) {
         return null;
       }
-      if (!ignoreSameVersionMarker &&
-          _isSameVersion(version) &&
-          await _sameVersionMarker.exists()) {
-        await _writeUpdateDebugLog(
-          'same-version marker consumed; version=$version',
-        );
-        await _sameVersionMarker.delete();
-        return null;
-      }
-      await _writeUpdateDebugLog('update available; version=$version url=$url');
       return _UpdateInfo(version: version, downloadUrl: url);
-    } catch (error) {
-      await _writeUpdateDebugLog('check failed: $error');
+    } catch (_) {
       return null;
     } finally {
       client.close(force: true);
     }
   }
 
-  static Future<void> markSameVersionUpdate() async {
-    await _sameVersionMarker.writeAsString('completed');
+  static Future<void> requestFromControlPanel(_UpdateInfo info) async {
+    final pending = File(
+      '${requestFile.path}.${DateTime.now().microsecondsSinceEpoch}.pending',
+    );
+    await pending.writeAsString(
+      jsonEncode({'version': info.version, 'downloadUrl': info.downloadUrl}),
+      flush: true,
+    );
+    if (await requestFile.exists()) await requestFile.delete();
+    await pending.rename(requestFile.path);
+  }
+
+  static Future<_UpdateInfo?> takeControlPanelRequest() async {
+    if (!await requestFile.exists()) return null;
+    try {
+      final data = jsonDecode(await requestFile.readAsString());
+      await requestFile.delete();
+      if (data is Map &&
+          data['version'] is String &&
+          data['downloadUrl'] is String) {
+        return _UpdateInfo(
+          version: data['version'] as String,
+          downloadUrl: data['downloadUrl'] as String,
+        );
+      }
+    } catch (_) {
+      try {
+        await requestFile.delete();
+      } catch (_) {}
+    }
+    return null;
   }
 
   static Future<File> download(
     _UpdateInfo info,
     ValueChanged<double> progress,
   ) async {
-    await _writeUpdateDebugLog(
-      'download started; version=${info.version} url=${info.downloadUrl}',
-    );
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 10);
     try {
@@ -137,7 +134,6 @@ class _UpdateService {
         const Duration(seconds: 30),
       );
       if (response.statusCode != HttpStatus.ok) {
-        await _writeUpdateDebugLog('download response=${response.statusCode}');
         throw HttpException('download failed');
       }
       final file = File(
@@ -155,12 +151,8 @@ class _UpdateService {
         }
         await sink.close();
         progress(1);
-        await _writeUpdateDebugLog(
-          'download completed; file=${file.path} bytes=$received',
-        );
         return file;
-      } catch (error) {
-        await _writeUpdateDebugLog('download write failed: $error');
+      } catch (_) {
         try {
           await file.delete();
         } catch (_) {}
@@ -181,13 +173,7 @@ class _UpdateService {
     await script.writeAsString(r'''
 param([string]$Archive, [string]$Executable, [int]$ProcessId)
 $ErrorActionPreference = 'Stop'
-$log = Join-Path ([IO.Path]::GetTempPath()) 'remielle-updater.log'
-function Write-UpdateLog([string]$Message) {
-  Add-Content -LiteralPath $log -Value (('[' + (Get-Date -Format o) + '] ') + $Message)
-}
-Write-UpdateLog "Updater started. Archive=$Archive Executable=$Executable PID=$ProcessId"
 while (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }
-Write-UpdateLog 'Main process exited.'
 $root = Split-Path -Parent $Executable
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('remielle-update-' + [guid]::NewGuid())
 $backup = $root + '.backup-' + [guid]::NewGuid()
@@ -202,27 +188,19 @@ try {
   $samePathProcesses = Get-Process | Where-Object {
     try { $_.Path -eq $Executable } catch { $false }
   }
-  Write-UpdateLog (('Same executable processes to close: ') + @($samePathProcesses).Count)
   $samePathProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 500
-  Write-UpdateLog 'Control panel and other same-path processes closed.'
   Move-Item -LiteralPath $root -Destination $backup -Force
   Move-Item -LiteralPath $temp -Destination $root -Force
-  Write-UpdateLog "Installed update into $root"
   Start-Process -FilePath $Executable -WorkingDirectory $root -WindowStyle Hidden
-  Write-UpdateLog 'Restart requested.'
-  Set-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'remielle-update-success.marker') -Value 'success'
   Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
 } catch {
-  Write-UpdateLog ('Update failed: ' + $_.Exception.Message)
-  Set-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'remielle-update-failed.marker') -Value $_.Exception.Message
   if (Test-Path -LiteralPath $backup) {
     if (Test-Path -LiteralPath $root) {
       Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     }
     Move-Item -LiteralPath $backup -Destination $root -Force
     Start-Process -FilePath $Executable -WorkingDirectory $root -WindowStyle Hidden -ErrorAction SilentlyContinue
-    Write-UpdateLog 'Rollback restart requested.'
   }
 } finally {
   Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
@@ -233,24 +211,16 @@ try {
     final quote = (String value) => '"${value.replaceAll('"', '""')}"';
     await launcher.writeAsString(
       '@echo off\r\n'
-      'start "" /b powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${quote(script.path)} ${quote(archive.path)} ${quote(Platform.resolvedExecutable)} ${pid}\r\n',
+      'start "" /b powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${quote(script.path)} ${quote(archive.path)} ${quote(Platform.resolvedExecutable)} ${pid}\r\n'
+      'del /f /q "%~f0"\r\n',
       flush: true,
     );
-    await _writeUpdateDebugLog(
-      'launch updater; launcher=${launcher.path} script=${script.path} archive=${archive.path} executable=${Platform.resolvedExecutable} pid=$pid',
+    await Process.start(
+      'cmd.exe',
+      ['/d', '/c', launcher.path],
+      mode: ProcessStartMode.detached,
+      workingDirectory: Directory.systemTemp.path,
     );
-    try {
-      await Process.start(
-        'cmd.exe',
-        ['/d', '/c', launcher.path],
-        mode: ProcessStartMode.detached,
-        workingDirectory: Directory.systemTemp.path,
-      );
-      await _writeUpdateDebugLog('updater process started');
-    } catch (error) {
-      await _writeUpdateDebugLog('updater process start failed: $error');
-      rethrow;
-    }
   }
 
   static bool _isNewer(String remote) {
@@ -266,23 +236,7 @@ try {
       final av = i < a.length ? a[i] : 0, bv = i < b.length ? b[i] : 0;
       if (av != bv) return av > bv;
     }
-    return true;
-  }
-
-  static bool _isSameVersion(String remote) {
-    List<int> parse(String value) => value
-        .split('.')
-        .map(
-          (part) =>
-              int.tryParse(part.replaceFirst(RegExp(r'[^0-9].*'), '')) ?? 0,
-        )
-        .toList();
-    final a = parse(remote), b = parse(_remielleVersion);
-    for (var i = 0; i < max(a.length, b.length); i++) {
-      final av = i < a.length ? a[i] : 0, bv = i < b.length ? b[i] : 0;
-      if (av != bv) return false;
-    }
-    return true;
+    return false;
   }
 }
 
@@ -567,6 +521,9 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   Timer? _caretHealthCheckTimer;
   StreamSubscription<FileSystemEvent>? _todoFileWatcher;
   Timer? _todoRefreshDebounce;
+  Timer? _midnightArchiveTimer;
+  Timer? _allTodosCompletedDelayTimer;
+  Timer? _allTodosCompletedDisplayTimer;
   Timer? _positionSaveDebounce;
   Timer? _longPressTimer;
   Timer? _animationCompletionTimer;
@@ -607,6 +564,9 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   _UpdateInfo? _updateInfo;
   _UpdateStatus _updateStatus = _UpdateStatus.idle;
   double _updateProgress = 0;
+  StreamSubscription<FileSystemEvent>? _updateRequestWatcher;
+  bool _takingUpdateRequest = false;
+  bool _showingAllTodosCompleted = false;
 
   @override
   void initState() {
@@ -623,8 +583,44 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _bubbleTodoFocusNode.addListener(_handleBubbleInputFocus);
     _refreshTodos();
     _initializeTodoWatcher();
+    _scheduleMidnightArchive();
     _scheduleRandomNormalEnd();
     unawaited(_checkForUpdates());
+    if (Platform.isWindows && !_isFlutterTest) {
+      unawaited(_consumeControlPanelUpdateRequest());
+      final requestPath = _UpdateService.requestFile.path.toLowerCase();
+      _updateRequestWatcher = Directory.systemTemp.watch().listen((event) {
+        final destination = event is FileSystemMoveEvent
+            ? event.destination?.toLowerCase()
+            : null;
+        if (event.path.toLowerCase() == requestPath ||
+            destination == requestPath) {
+          unawaited(_consumeControlPanelUpdateRequest());
+        }
+      }, onError: (_) {});
+    }
+  }
+
+  Future<void> _consumeControlPanelUpdateRequest() async {
+    if (!mounted ||
+        _takingUpdateRequest ||
+        _updateStatus == _UpdateStatus.downloading) {
+      return;
+    }
+    _takingUpdateRequest = true;
+    try {
+      final update = await _UpdateService.takeControlPanelRequest();
+      if (!mounted || update == null) return;
+      setState(() {
+        _updateInfo = update;
+        _updateStatus = _UpdateStatus.available;
+        _bubbleVisible = true;
+      });
+      if (!_petVisible) await _showPet();
+      unawaited(_downloadUpdate());
+    } finally {
+      _takingUpdateRequest = false;
+    }
   }
 
   Future<void> _checkForUpdates() async {
@@ -649,9 +645,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   Future<void> _downloadUpdate() async {
     final update = _updateInfo;
     if (update == null || _updateStatus == _UpdateStatus.downloading) return;
-    await _writeUpdateDebugLog(
-      'download flow started; update=${update.version} current=$_remielleVersion mainPid=$pid panelPid=${_panelProcess?.pid ?? 'none'}',
-    );
     setState(() {
       _updateStatus = _UpdateStatus.downloading;
       _updateProgress = 0;
@@ -662,17 +655,9 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       });
       if (!mounted) return;
       await _saveWindowPosition();
-      if (_UpdateService._isSameVersion(update.version)) {
-        await _UpdateService.markSameVersionUpdate();
-        await _writeUpdateDebugLog('same-version marker written');
-      }
       await _UpdateService.launchUpdater(archive);
-      await _writeUpdateDebugLog(
-        'requesting main process exit; panelPid=${_panelProcess?.pid ?? 'none'}',
-      );
       exit(0);
-    } catch (error) {
-      await _writeUpdateDebugLog('download flow failed: $error');
+    } catch (_) {
       if (mounted) setState(() => _updateStatus = _UpdateStatus.failed);
     }
   }
@@ -706,6 +691,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   @override
   void dispose() {
+    unawaited(_updateRequestWatcher?.cancel());
     _randomNormalTimer?.cancel();
     _caretIdleTimer?.cancel();
     _localCaretLossTimer?.cancel();
@@ -714,6 +700,9 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _animationCompletionTimer?.cancel();
     _busyAnimationSafetyTimer?.cancel();
     _todoRefreshDebounce?.cancel();
+    _midnightArchiveTimer?.cancel();
+    _allTodosCompletedDelayTimer?.cancel();
+    _allTodosCompletedDisplayTimer?.cancel();
     _positionSaveDebounce?.cancel();
     _todoFileWatcher?.cancel();
     _bubbleTodoFocusNode.removeListener(_handleBubbleInputFocus);
@@ -969,6 +958,14 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     setState(() => _todos = next);
   }
 
+  void _scheduleMidnightArchive() {
+    _midnightArchiveTimer?.cancel();
+    _midnightArchiveTimer = Timer(_timeUntilNextMidnight(DateTime.now()), () {
+      unawaited(_refreshTodos());
+      _scheduleMidnightArchive();
+    });
+  }
+
   Future<void> _saveBubbleTodos(
     _PanelData current,
     List<TodoEntry> todos,
@@ -996,7 +993,10 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   Future<void> _addBubbleTodo() async {
     final title = _bubbleTodoController.text.trim();
-    if (title.isEmpty) return;
+    if (title.isEmpty) {
+      _bubbleTodoFocusNode.unfocus();
+      return;
+    }
     final current = await _PanelDataStore.load();
     final nextId =
         current.todos.fold<int>(0, (maxId, todo) => max(maxId, todo.id)) + 1;
@@ -1020,7 +1020,31 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
             clearCompletedAt: true,
           );
     await _saveBubbleTodos(current, todos);
-    if (completing && mounted) _playAnimation(_PetAnimation.todoDone);
+    if (completing && mounted) {
+      _playAnimation(_PetAnimation.todoDone);
+      if (_todayTodosAreCompleted(todos)) {
+        _scheduleAllTodosCompletedCelebration();
+      }
+    }
+  }
+
+  void _scheduleAllTodosCompletedCelebration() {
+    _allTodosCompletedDelayTimer?.cancel();
+    _allTodosCompletedDisplayTimer?.cancel();
+    if (_showingAllTodosCompleted && mounted) {
+      setState(() => _showingAllTodosCompleted = false);
+    }
+    _allTodosCompletedDelayTimer = Timer(const Duration(seconds: 1), () {
+      if (!mounted) return;
+      setState(() {
+        _showingAllTodosCompleted = true;
+        _bubbleVisible = true;
+      });
+      _allTodosCompletedDisplayTimer = Timer(const Duration(seconds: 5), () {
+        if (!mounted) return;
+        setState(() => _showingAllTodosCompleted = false);
+      });
+    });
   }
 
   Future<void> _reorderBubbleTodo(
@@ -1056,6 +1080,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   Future<void> _showBubbleTodoMenu(
     TodoEntry todo,
     Offset globalPosition,
+    VoidCallback onEdit,
   ) async {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final position = overlay.globalToLocal(globalPosition);
@@ -1100,51 +1125,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       ],
     );
     if (!mounted) return;
-    if (selected == 'edit') await _editBubbleTodo(todo);
+    if (selected == 'edit') onEdit();
     if (selected == 'delete') await _deleteBubbleTodo(todo);
-  }
-
-  Future<void> _editBubbleTodo(TodoEntry todo) async {
-    final controller = TextEditingController(text: todo.title);
-    final value = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xfffffbfc),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: const BorderSide(color: Color(0xfffde8ed)),
-        ),
-        title: const Text(
-          '编辑 Todo',
-          style: TextStyle(fontFamily: 'Microsoft YaHei', fontSize: 15),
-        ),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          onSubmitted: (value) => Navigator.of(context).pop(value),
-          style: const TextStyle(fontFamily: 'Microsoft YaHei', fontSize: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    final title = value?.trim();
-    if (title == null || title.isEmpty) return;
-    final current = await _PanelDataStore.load();
-    final todos = List<TodoEntry>.of(current.todos);
-    final index = todos.indexWhere((item) => item.id == todo.id);
-    if (index < 0) return;
-    todos[index] = todos[index].copyWith(title: title);
-    await _saveBubbleTodos(current, todos);
   }
 
   Future<void> _renameBubbleTodo(TodoEntry todo, String title) async {
@@ -1176,35 +1158,29 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   Future<void> _deleteBubbleTodo(TodoEntry todo) async {
     final current = await _PanelDataStore.load();
+    if (!mounted) return;
     if (!current.skipTodoDeleteConfirmation) {
       final confirmed = await showDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
-          backgroundColor: const Color(0xfffffbfc),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-            side: const BorderSide(color: Color(0xfffde8ed)),
-          ),
-          title: const Text('删除 Todo'),
-          content: Text('确定要删除“${todo.title}”吗？'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('删除'),
-            ),
-          ],
+        builder: (context) => _DeleteTodoDialog(
+          title: todo.title,
+          onCancelled: () => Navigator.of(context).pop(false),
+          onConfirmed: () => Navigator.of(context).pop(true),
         ),
       );
       if (confirmed != true || !mounted) return;
     }
     final latest = await _PanelDataStore.load();
+    final deletingIncomplete = latest.todos.any(
+      (item) => item.id == todo.id && item.completedAt == null,
+    );
     final todos = List<TodoEntry>.of(latest.todos)
       ..removeWhere((item) => item.id == todo.id);
     await _saveBubbleTodos(latest, todos);
+    if (deletingIncomplete && _allTodosAreCompleted(todos) && mounted) {
+      _playAnimation(_PetAnimation.todoDone);
+      _scheduleAllTodosCompletedCelebration();
+    }
   }
 
   void _initializeCaretMonitoring() {
@@ -1365,10 +1341,14 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       _panelProcess = null;
       return;
     }
+    if (event == 'allTodosCompleted') {
+      _scheduleAllTodosCompletedCelebration();
+    }
     final next = switch (event) {
       'inputFocus' => _PetAnimation.busy,
       'inputEnd' => _PetAnimation.busyEnd,
       'todoDone' => _PetAnimation.todoDone,
+      'allTodosCompleted' => _PetAnimation.todoDone,
       _ => null,
     };
     if (next != null && next != _animation) {
@@ -1571,39 +1551,83 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   Process? _panelProcess;
+  bool _openingPanel = false;
+
+  Future<bool> _showExistingPanel() async {
+    if (!Platform.isWindows) return false;
+    try {
+      return await _systemChannel.invokeMethod<bool>(
+            'showExistingControlPanel',
+          ) ==
+          true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _hasExistingPanel() async {
+    if (!Platform.isWindows) return false;
+    try {
+      return await _systemChannel.invokeMethod<bool>(
+            'hasExistingControlPanel',
+          ) ==
+          true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _waitForPanelWindow() async {
+    for (var attempt = 0; attempt < 40; attempt++) {
+      if (await _showExistingPanel()) {
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        await _showExistingPanel();
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+
+  Future<bool> _focusExistingPanelAfterMenuCloses() async {
+    if (!await _hasExistingPanel()) return false;
+    for (var attempt = 0; attempt < 6; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      if (await _showExistingPanel()) return true;
+    }
+    // The panel exists, so do not launch a second instance if Windows keeps
+    // the tray menu's foreground lock for longer than the retry window.
+    return true;
+  }
 
   Future<void> _openPanelWindow() async {
-    final log = File('${Directory.systemTemp.path}\\remielle-panel.log');
-    await log.writeAsString(
-      '[${DateTime.now().toIso8601String()}] tray panel request\n',
-      mode: FileMode.append,
-    );
-    if (Platform.isWindows) {
-      final existing = await _systemChannel.invokeMethod<bool>(
-        'showExistingControlPanel',
-      );
-      await log.writeAsString('existing=$existing\n', mode: FileMode.append);
-      if (existing == true) return;
+    if (_openingPanel) {
+      await _focusExistingPanelAfterMenuCloses();
+      return;
     }
-    final executable = File(Platform.resolvedExecutable);
+    _openingPanel = true;
     try {
-      await log.writeAsString(
-        'launch=${executable.path}\nexists=${await executable.exists()}\n',
-        mode: FileMode.write,
-      );
+      if (await _focusExistingPanelAfterMenuCloses()) return;
+
+      final executable = File(Platform.resolvedExecutable);
       final process = await Process.start(
         executable.path,
-        const ['--control-panel'],
+        ['--control-panel', '--parent-pid=$pid'],
         workingDirectory: executable.parent.path,
         mode: ProcessStartMode.detached,
       );
       _panelProcess = process;
-      process.exitCode.then((_) {
-        if (identical(_panelProcess, process)) _panelProcess = null;
-      });
-      await log.writeAsString('pid=${process.pid}\n', mode: FileMode.append);
-    } catch (error) {
-      await log.writeAsString('error=$error\n', mode: FileMode.append);
+      try {
+        await _systemChannel.invokeMethod<bool>(
+          'assignControlPanelToJob',
+          process.pid,
+        );
+      } catch (_) {
+        // The native parent-process wait remains the lifecycle guarantee.
+      }
+      await _waitForPanelWindow();
+    } catch (_) {
+    } finally {
+      _openingPanel = false;
     }
   }
 
@@ -1649,6 +1673,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
                           _TodoSpeechBubble(
                             height: _bubbleHeight,
                             todos: _todos,
+                            showAllTodosCompleted: _showingAllTodosCompleted,
                             controller: _bubbleTodoController,
                             focusNode: _bubbleTodoFocusNode,
                             onAdd: _addBubbleTodo,
@@ -1911,6 +1936,7 @@ class _TodoSpeechBubble extends StatefulWidget {
   const _TodoSpeechBubble({
     required this.height,
     required this.todos,
+    required this.showAllTodosCompleted,
     required this.controller,
     required this.focusNode,
     required this.onAdd,
@@ -1930,6 +1956,7 @@ class _TodoSpeechBubble extends StatefulWidget {
 
   final double height;
   final List<TodoEntry> todos;
+  final bool showAllTodosCompleted;
   final TextEditingController controller;
   final FocusNode focusNode;
   final VoidCallback onAdd;
@@ -1937,7 +1964,7 @@ class _TodoSpeechBubble extends StatefulWidget {
   final VoidCallback onClose;
   final ValueChanged<TodoEntry> onToggle;
   final Future<void> Function(TodoEntry, TodoEntry, bool) onReorder;
-  final void Function(TodoEntry, Offset) onMenu;
+  final void Function(TodoEntry, Offset, VoidCallback) onMenu;
   final Future<void> Function(TodoEntry, String) onEdit;
   final ValueChanged<bool> onEditFocusChanged;
   final _UpdateInfo? updateInfo;
@@ -1968,7 +1995,7 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
   VoidCallback get onBlankTap => widget.onBlankTap;
   VoidCallback get onClose => widget.onClose;
   ValueChanged<TodoEntry> get onToggle => widget.onToggle;
-  void Function(TodoEntry, Offset) get onMenu => widget.onMenu;
+  void Function(TodoEntry, Offset, VoidCallback) get onMenu => widget.onMenu;
 
   @override
   void initState() {
@@ -2091,7 +2118,7 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                       children: [
                         const Expanded(
                           child: Text(
-                            '本日待办✨️',
+                            '今日待办✨️',
                             style: TextStyle(
                               fontFamily: 'Microsoft YaHei',
                               fontSize: 13,
@@ -2136,7 +2163,13 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                       behavior: ScrollConfiguration.of(
                         context,
                       ).copyWith(scrollbars: false),
-                      child: todos.isEmpty
+                      child: widget.showAllTodosCompleted
+                          ? const _BubbleEmptyPlaceholder(
+                              title: '今天所有任务都完成啦~',
+                              subtitle: '辛苦了，休息一下吧 🌸',
+                              titleBold: true,
+                            )
+                          : todos.isEmpty
                           ? const _BubbleEmptyPlaceholder()
                           : ListView.separated(
                               physics: const _BubbleScrollPhysics(),
@@ -2154,7 +2187,11 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                                   onEditTapOutside: (_) => _finishEditing(),
                                   onBlankTap: onBlankTap,
                                   onToggle: () => onToggle(todo),
-                                  onMenu: (position) => onMenu(todo, position),
+                                  onMenu: (position) => onMenu(
+                                    todo,
+                                    position,
+                                    () => unawaited(_startEditing(todo)),
+                                  ),
                                   onReorder: widget.onReorder,
                                 );
                               },
@@ -2486,25 +2523,30 @@ class _TodoBubbleRow extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     child: editing
-                        ? TextField(
-                            key: ValueKey('bubble-edit-todo-${todo.id}'),
-                            controller: editController,
-                            focusNode: editFocusNode,
-                            onSubmitted: (_) => onEditSubmitted(),
-                            onTapOutside: onEditTapOutside,
-                            textInputAction: TextInputAction.done,
-                            minLines: 1,
-                            maxLines: null,
-                            style: const TextStyle(
-                              fontFamily: 'Microsoft YaHei',
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: Color(0xff4a4a4a),
-                            ),
-                            decoration: const InputDecoration(
-                              border: InputBorder.none,
-                              isDense: true,
-                              contentPadding: EdgeInsets.zero,
+                        ? TextSelectionTheme(
+                            data: TextSelectionTheme.of(
+                              context,
+                            ).copyWith(selectionColor: const Color(0xffffb6c1)),
+                            child: TextField(
+                              key: ValueKey('bubble-edit-todo-${todo.id}'),
+                              controller: editController,
+                              focusNode: editFocusNode,
+                              onSubmitted: (_) => onEditSubmitted(),
+                              onTapOutside: onEditTapOutside,
+                              textInputAction: TextInputAction.done,
+                              minLines: 1,
+                              maxLines: null,
+                              style: const TextStyle(
+                                fontFamily: 'Microsoft YaHei',
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                                color: Color(0xff4a4a4a),
+                              ),
+                              decoration: const InputDecoration(
+                                border: InputBorder.none,
+                                isDense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
                             ),
                           )
                         : GestureDetector(
@@ -2528,7 +2570,15 @@ class _TodoBubbleRow extends StatelessWidget {
 }
 
 class _BubbleEmptyPlaceholder extends StatelessWidget {
-  const _BubbleEmptyPlaceholder();
+  const _BubbleEmptyPlaceholder({
+    this.title = '今天没有待办哦~',
+    this.subtitle = '可以休息一下啦 🌸',
+    this.titleBold = false,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool titleBold;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -2537,19 +2587,19 @@ class _BubbleEmptyPlaceholder extends StatelessWidget {
       children: [
         const Icon(Icons.auto_awesome, size: 20, color: Color(0xffffb6c1)),
         const SizedBox(height: 12),
-        const Text(
-          '今天没有待办哦~',
+        Text(
+          title,
           textAlign: TextAlign.center,
           style: TextStyle(
             fontFamily: 'Microsoft YaHei',
             fontSize: 12,
-            fontWeight: FontWeight.w500,
+            fontWeight: titleBold ? FontWeight.w700 : FontWeight.w500,
             color: Color(0xffff69b4),
           ),
         ),
         const SizedBox(height: 4),
-        const Text(
-          '可以休息一下啦 🌸',
+        Text(
+          subtitle,
           textAlign: TextAlign.center,
           style: TextStyle(
             fontFamily: 'Microsoft YaHei',

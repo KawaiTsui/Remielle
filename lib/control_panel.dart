@@ -1,24 +1,29 @@
 part of 'main.dart';
 
 ThemeData _controlPanelTheme() {
-  const accent = Color(0xff0067c0);
-  const foreground = Color(0xff1a1a1a);
+  const accent = Color(0xff0078d4);
+  const foreground = Color(0xff111827);
   final base = ThemeData(
     useMaterial3: true,
     fontFamily: 'Microsoft YaHei',
-    scaffoldBackgroundColor: const Color(0xfff5f5f5),
+    scaffoldBackgroundColor: Colors.white,
     colorScheme: const ColorScheme.light(
       primary: accent,
       onPrimary: Colors.white,
-      surface: Color(0xfff5f5f5),
+      surface: Colors.white,
       onSurface: foreground,
-      outline: Color(0xff8a8a8a),
+      outline: Color(0xffe5e7eb),
     ),
   );
   return base.copyWith(
     splashFactory: NoSplash.splashFactory,
-    hoverColor: const Color(0xffe9e9e9),
-    focusColor: const Color(0xffe5e5e5),
+    hoverColor: const Color(0xfff3f4f6),
+    focusColor: const Color(0xffeff6ff),
+    dialogTheme: const DialogThemeData(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(side: BorderSide(color: Color(0xffe5e7eb))),
+    ),
     textTheme: base.textTheme.apply(
       fontFamily: 'Microsoft YaHei',
       bodyColor: foreground,
@@ -27,15 +32,44 @@ ThemeData _controlPanelTheme() {
     inputDecorationTheme: const InputDecorationTheme(
       filled: true,
       fillColor: Colors.white,
-      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.all(Radius.circular(2)),
-        borderSide: BorderSide(color: Color(0xff8a8a8a)),
+        borderRadius: BorderRadius.all(Radius.circular(8)),
+        borderSide: BorderSide(color: Color(0xffe5e7eb)),
       ),
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.all(Radius.circular(2)),
-        borderSide: BorderSide(color: accent, width: 2),
+        borderRadius: BorderRadius.all(Radius.circular(8)),
+        borderSide: BorderSide(color: accent, width: 1.5),
       ),
+    ),
+    checkboxTheme: CheckboxThemeData(
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+      overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+      side: WidgetStateBorderSide.resolveWith((states) {
+        if (states.contains(WidgetState.hovered)) {
+          return const BorderSide(color: Color(0xff111111), width: 1);
+        }
+        if (states.contains(WidgetState.selected)) {
+          return const BorderSide(color: Color(0xff0078d4), width: 1.5);
+        }
+        return const BorderSide(color: Color(0xffd1d5db), width: 1);
+      }),
+      fillColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? const Color(0xff0078d4)
+            : Colors.transparent,
+      ),
+    ),
+    switchTheme: const SwitchThemeData(
+      overlayColor: WidgetStatePropertyAll(Colors.transparent),
+    ),
+    scrollbarTheme: ScrollbarThemeData(
+      thumbColor: WidgetStateProperty.all(const Color(0xffcbd5e1)),
+      thickness: WidgetStateProperty.all(5),
+      radius: const Radius.circular(3),
+      crossAxisMargin: 0,
     ),
   );
 }
@@ -67,6 +101,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   final _todoFocusNode = FocusNode();
   final _editController = TextEditingController();
   final _editFocusNode = FocusNode();
+  final _todoScrollController = ScrollController();
   final _todos = <TodoEntry>[];
   _PanelSection _section = _PanelSection.todo;
   int _nextTodoId = 1;
@@ -81,8 +116,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   bool _inputSessionActive = false;
   int? _hoveredTodoId;
   int? _editingTodoId;
+  final Set<DateTime> _expandedArchiveDays = <DateTime>{};
+  final Set<DateTime> _expandedIncompleteArchiveDays = <DateTime>{};
   StreamSubscription<FileSystemEvent>? _todoFileWatcher;
   Timer? _todoRefreshDebounce;
+  Timer? _midnightArchiveRefreshTimer;
 
   @override
   void initState() {
@@ -92,6 +130,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     _editFocusNode.addListener(_onInputFocusChanged);
     _initializePanel();
     _initializeTodoWatcher();
+    _scheduleMidnightArchiveRefresh();
   }
 
   Future<void> _initializePanel() async {
@@ -120,6 +159,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   void dispose() {
     _todoFileWatcher?.cancel();
     _todoRefreshDebounce?.cancel();
+    _midnightArchiveRefreshTimer?.cancel();
     windowManager.removeListener(this);
     _todoFocusNode.removeListener(_onInputFocusChanged);
     _editFocusNode.removeListener(_onInputFocusChanged);
@@ -127,6 +167,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     _editFocusNode.dispose();
     _todoController.dispose();
     _editController.dispose();
+    _todoScrollController.dispose();
     super.dispose();
   }
 
@@ -160,6 +201,17 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     });
   }
 
+  void _scheduleMidnightArchiveRefresh() {
+    _midnightArchiveRefreshTimer?.cancel();
+    _midnightArchiveRefreshTimer = Timer(
+      _timeUntilNextMidnight(DateTime.now()),
+      () {
+        if (mounted) setState(() {});
+        _scheduleMidnightArchiveRefresh();
+      },
+    );
+  }
+
   void _onInputFocusChanged() {
     if ((_todoFocusNode.hasFocus || _editFocusNode.hasFocus) &&
         !_inputSessionActive) {
@@ -176,6 +228,8 @@ class _ControlPanelPageState extends State<ControlPanelPage>
 
   void _addTodo() {
     final value = _todoController.text.trim();
+    _endInputSession();
+    FocusManager.instance.primaryFocus?.unfocus();
     if (value.isEmpty) return;
     setState(() {
       _todos.add(
@@ -183,8 +237,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       );
       _todoController.clear();
     });
-    _endInputSession();
-    FocusManager.instance.primaryFocus?.unfocus();
     _savePanelData();
   }
 
@@ -196,7 +248,9 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       _todos[index] = todo.copyWith(completedAt: DateTime.now());
     });
     await _savePanelData();
-    await _sendPetEvent('todoDone');
+    await _sendPetEvent(
+      _todayTodosAreCompleted(_todos) ? 'allTodosCompleted' : 'todoDone',
+    );
   }
 
   Future<void> _restoreTodo(TodoEntry todo) async {
@@ -268,30 +322,23 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     if (!_skipTodoDeleteConfirmation) {
       final confirmed = await showDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
-          shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(3)),
-          ),
-          title: const Text('删除 Todo'),
-          content: Text('确定要删除“${todo.title}”吗？'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              key: const ValueKey('confirm-delete-todo'),
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('删除'),
-            ),
-          ],
+        builder: (context) => _DeleteTodoDialog(
+          title: todo.title,
+          confirmKey: const ValueKey('confirm-delete-todo'),
+          accentColor: const Color(0xff0078d4),
+          onCancelled: () => Navigator.of(context).pop(false),
+          onConfirmed: () => Navigator.of(context).pop(true),
         ),
       );
       if (confirmed != true || !mounted) return;
     }
     if (_editingTodoId == todo.id) _cancelEditing();
+    final deletingIncomplete = todo.completedAt == null;
     setState(() => _todos.removeWhere((item) => item.id == todo.id));
     await _savePanelData();
+    if (deletingIncomplete && _allTodosAreCompleted(_todos)) {
+      await _sendPetEvent('allTodosCompleted');
+    }
   }
 
   Future<void> _startEditing(TodoEntry todo) async {
@@ -396,92 +443,45 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   Future<void> _checkForUpdateManually() async {
     if (_checkingForUpdate) return;
     setState(() => _checkingForUpdate = true);
-    final update = await _UpdateService.check(ignoreSameVersionMarker: true);
+    final update = await _UpdateService.check();
     if (!mounted) return;
     setState(() => _checkingForUpdate = false);
     if (update == null) {
       await showDialog<void>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('软件更新'),
-          content: const Text('当前版本 v$_remielleVersion 已是最新版本。'),
-          actions: [
-            FilledButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('确定'),
-            ),
-          ],
+        builder: (context) => _UpdateDialog(
+          message: '当前版本 v$_remielleVersion 已是最新版本。',
+          primaryLabel: '确定',
+          onPrimary: () => Navigator.pop(context),
         ),
       );
       return;
     }
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('发现新版本 v${update.version}'),
-        content: const Text('是否立即下载并安装更新？安装完成后软件将自动重启。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('暂不更新'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('立即更新'),
-          ),
-        ],
+      builder: (context) => _UpdateDialog(
+        message: '发现新版本 v${update.version}，是否立即下载并更新？',
+        primaryLabel: '立即更新',
+        secondaryLabel: '暂不更新',
+        onPrimary: () => Navigator.pop(context, true),
+        onSecondary: () => Navigator.pop(context, false),
       ),
     );
     if (confirmed != true || !mounted) return;
 
-    final progress = ValueNotifier<double>(0);
-    unawaited(
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: Text('正在更新至 v${update.version}'),
-          content: ValueListenableBuilder<double>(
-            valueListenable: progress,
-            builder: (context, value, _) => Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('下载中 ${(value * 100).round()}%'),
-                const SizedBox(height: 12),
-                LinearProgressIndicator(value: value),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+    // The desktop pet owns the single download task and its progress UI.
     try {
-      final archive = await _UpdateService.download(
-        update,
-        (value) => progress.value = value.clamp(0, 1),
-      );
-      if (_UpdateService._isSameVersion(update.version)) {
-        await _UpdateService.markSameVersionUpdate();
-      }
-      await _UpdateService.launchUpdater(archive);
-      progress.dispose();
+      await _UpdateService.requestFromControlPanel(update);
       exit(0);
     } catch (error) {
-      progress.dispose();
       if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop();
       await showDialog<void>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('更新失败'),
-          content: Text('无法完成更新：$error'),
-          actions: [
-            FilledButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('确定'),
-            ),
-          ],
+        builder: (context) => _UpdateDialog(
+          title: '更新失败',
+          message: '无法开始更新：$error',
+          primaryLabel: '确定',
+          onPrimary: () => Navigator.pop(context),
         ),
       );
     }
@@ -535,7 +535,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             setState(() => _section = section);
           },
         ),
-        const VerticalDivider(width: 1, thickness: 1, color: Color(0xffd6d6d6)),
+        const VerticalDivider(width: 1, thickness: 1, color: Color(0xffe5e7eb)),
         Expanded(
           child: switch (_section) {
             _PanelSection.todo => _buildTodoPage(),
@@ -558,11 +558,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       }
     },
     child: Padding(
-      padding: const EdgeInsets.fromLTRB(36, 30, 36, 28),
+      padding: const EdgeInsets.fromLTRB(40, 36, 32, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _PageHeader(title: '今日待办', subtitle: '记录今天需要完成的事项'),
+          const _PageHeader(title: '待办清单', subtitle: ''),
           const SizedBox(height: 28),
           Row(
             children: [
@@ -573,7 +573,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                   focusNode: _todoFocusNode,
                   style: const TextStyle(fontSize: 14),
                   decoration: const InputDecoration(
-                    hintText: '添加 Todo',
                     fillColor: Colors.white,
                     hoverColor: Colors.white,
                     constraints: BoxConstraints(minHeight: 42, maxHeight: 42),
@@ -590,13 +589,13 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                   tooltip: '添加 Todo',
                   style: IconButton.styleFrom(
                     foregroundColor: Colors.white,
-                    backgroundColor: const Color(0xff0067c0),
+                    backgroundColor: const Color(0xff0078d4),
                     shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(2)),
+                      borderRadius: BorderRadius.all(Radius.circular(8)),
                     ),
                   ),
                   onPressed: _addTodo,
-                  icon: const Icon(Icons.add, size: 20),
+                  icon: const Icon(Icons.add, size: 19),
                 ),
               ),
             ],
@@ -610,68 +609,65 @@ class _ControlPanelPageState extends State<ControlPanelPage>
 
   Widget _buildTodoArchiveList() {
     final today = _startOfDay(DateTime.now());
-    final groups = <DateTime, List<TodoEntry>>{};
-    for (final todo in _todos.where((todo) => todo.completedAt == null)) {
-      final day = _startOfDay(todo.createdAt);
-      (groups[day] ??= <TodoEntry>[]).add(todo);
-    }
-    groups.putIfAbsent(today, () => <TodoEntry>[]);
-    final days = groups.keys.toList()..sort((a, b) => b.compareTo(a));
-    final children = <Widget>[];
-    for (var i = 0; i < days.length; i++) {
-      final day = days[i];
-      final todos = groups[day]!
-        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-      children.add(
-        _buildTodoDropHeader(
-          _todoDayLabel(day, today),
-          todos.length,
-          day: day,
-          completed: false,
+    final todayTodos =
+        _todos
+            .where(
+              (todo) =>
+                  todo.completedAt == null && _isSameDay(todo.createdAt, today),
+            )
+            .toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final children = <Widget>[_buildTodoSectionHeader('今日待办')];
+    children.add(
+      _buildTodoDateDropHeader(
+        _formatTodoDate(today),
+        todayTodos.length,
+        day: today,
+        completed: false,
+      ),
+    );
+    if (todayTodos.isEmpty) {
+      children.add(const _TodoEmptyState('今天还没有待办事项'));
+    } else {
+      children.addAll(
+        todayTodos.map(
+          (todo) => _buildTodoRow(todo, completed: false, compact: true),
         ),
       );
-      if (todos.isEmpty) {
-        children.add(const _TodoEmptyState('今天还没有待办事项'));
-      } else {
-        children.addAll(
-          _withDividers(
-            todos.map(
-              (todo) =>
-                  _buildTodoRow(todo, completed: todo.completedAt != null),
-            ),
-          ),
-        );
-      }
-      if (i < days.length - 1) children.add(const SizedBox(height: 24));
     }
-    final completedTodos =
-        _todos.where((todo) => todo.completedAt != null).toList()
-          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    final completed = completedTodos.length;
+
     children
       ..add(const SizedBox(height: 24))
-      ..add(_buildTodoSectionHeader('已完成', completed));
-    if (completed > 0) {
-      final completedGroups = <DateTime, List<TodoEntry>>{};
-      for (final todo in completedTodos) {
-        final day = _startOfDay(todo.createdAt);
-        (completedGroups[day] ??= <TodoEntry>[]).add(todo);
-      }
-      final completedDays = completedGroups.keys.toList()
-        ..sort((a, b) => b.compareTo(a));
-      for (final day in completedDays) {
-        final todos = completedGroups[day]!
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-        children
-          ..add(_buildArchiveDayHeader(_formatTodoDate(day)))
-          ..addAll(
-            _withDividers(
-              todos.map((todo) => _buildTodoRow(todo, completed: true)),
-            ),
-          );
-      }
+      ..add(_buildTodoSectionHeader('未完成'));
+    final incompleteGroups = _groupTodosByCreatedDay(
+      _todos.where(
+        (todo) =>
+            todo.completedAt == null && !_isSameDay(todo.createdAt, today),
+      ),
+    );
+    _addArchiveGroups(
+      children,
+      incompleteGroups,
+      completed: false,
+      expandedDays: _expandedIncompleteArchiveDays,
+    );
+    if (incompleteGroups.isEmpty) {
+      children.add(const _TodoEmptyState('没有未完成的历史待办'));
     }
-    if (completed == 0) {
+
+    final completedGroups = _groupTodosByCreatedDay(
+      _todos.where((todo) => todo.completedAt != null),
+    );
+    children
+      ..add(const SizedBox(height: 24))
+      ..add(_buildTodoSectionHeader('已完成'));
+    _addArchiveGroups(
+      children,
+      completedGroups,
+      completed: true,
+      expandedDays: _expandedArchiveDays,
+    );
+    if (completedGroups.isEmpty) {
       children.add(
         DragTarget<TodoEntry>(
           onAcceptWithDetails: (details) =>
@@ -687,7 +683,59 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       );
       children.add(const _TodoEmptyState('完成的 Todo 会自动归档到这里'));
     }
-    return ListView(padding: EdgeInsets.zero, children: children);
+    return Scrollbar(
+      controller: _todoScrollController,
+      thickness: 5,
+      radius: const Radius.circular(3),
+      child: ListView(
+        controller: _todoScrollController,
+        padding: const EdgeInsets.only(right: 16),
+        children: children,
+      ),
+    );
+  }
+
+  Map<DateTime, List<TodoEntry>> _groupTodosByCreatedDay(
+    Iterable<TodoEntry> todos,
+  ) {
+    final groups = <DateTime, List<TodoEntry>>{};
+    for (final todo in todos) {
+      final day = _startOfDay(todo.createdAt);
+      (groups[day] ??= <TodoEntry>[]).add(todo);
+    }
+    return groups;
+  }
+
+  void _addArchiveGroups(
+    List<Widget> children,
+    Map<DateTime, List<TodoEntry>> groups, {
+    required bool completed,
+    required Set<DateTime> expandedDays,
+  }) {
+    final days = groups.keys.toList()..sort((a, b) => b.compareTo(a));
+    for (final day in days) {
+      final todos = groups[day]!
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      final expanded = expandedDays.contains(day);
+      children.add(
+        _buildArchiveDayHeader(
+          day,
+          todos.length,
+          completed: completed,
+          expanded: expanded,
+          onExpandedChanged: (value) => setState(() {
+            value ? expandedDays.add(day) : expandedDays.remove(day);
+          }),
+        ),
+      );
+      if (expanded) {
+        children.addAll(
+          todos.map(
+            (todo) => _buildTodoRow(todo, completed: completed, compact: true),
+          ),
+        );
+      }
+    }
   }
 
   // ignore: unused_element
@@ -708,13 +756,13 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     return ListView(
       padding: EdgeInsets.zero,
       children: [
-        _buildTodoSectionHeader('当天加入', todayTodos.length),
+        _buildTodoSectionHeader('今日待办'),
         if (todayTodos.isEmpty)
           const _TodoEmptyState('今天还没有待办事项')
         else
           ..._withDividers(todayTodos.map((todo) => _buildTodoRow(todo))),
         const SizedBox(height: 24),
-        _buildTodoSectionHeader('已完成', completedTodos.length),
+        _buildTodoSectionHeader('已完成'),
         if (completedTodos.isEmpty)
           const _TodoEmptyState('完成的 Todo 会自动归档到这里')
         else
@@ -725,30 +773,21 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     );
   }
 
-  Widget _buildTodoSectionHeader(String title, int count) => Column(
+  Widget _buildTodoSectionHeader(String title) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Row(
-        children: [
-          Text(
-            title,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            '$count',
-            style: const TextStyle(color: Color(0xff666666), fontSize: 12),
-          ),
-        ],
+      Text(
+        title,
+        style: Theme.of(
+          context,
+        ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
       ),
       const SizedBox(height: 8),
       const Divider(height: 1, color: Color(0xffcfcfcf)),
     ],
   );
 
-  Widget _buildTodoDropHeader(
+  Widget _buildTodoDateDropHeader(
     String title,
     int count, {
     required DateTime day,
@@ -756,7 +795,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   }) => DragTarget<TodoEntry>(
     onAcceptWithDetails: (details) => _dropTodo(details.data, day, completed),
     builder: (context, candidates, rejected) =>
-        _buildTodoSectionHeader(title, count),
+        _buildTodoDateHeader(title, count, highlighted: candidates.isNotEmpty),
   );
 
   List<Widget> _withDividers(Iterable<Widget> rows) {
@@ -770,19 +809,80 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     return result;
   }
 
-  Widget _buildArchiveDayHeader(String label) => Padding(
-    padding: const EdgeInsets.only(top: 14, bottom: 6),
-    child: Text(
-      label,
-      style: const TextStyle(
-        color: Color(0xff666666),
-        fontSize: 12,
-        fontWeight: FontWeight.w600,
+  Widget _buildTodoDateHeader(
+    String label,
+    int count, {
+    bool highlighted = false,
+  }) => Container(
+    color: highlighted ? const Color(0x220067c0) : null,
+    padding: const EdgeInsets.only(top: 10, bottom: 4),
+    child: Row(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Color(0xff666666),
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          '$count',
+          style: const TextStyle(color: Color(0xff888888), fontSize: 11),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildArchiveDayHeader(
+    DateTime day,
+    int count, {
+    required bool completed,
+    required bool expanded,
+    required ValueChanged<bool> onExpandedChanged,
+  }) => DragTarget<TodoEntry>(
+    onAcceptWithDetails: (details) => _dropTodo(details.data, day, completed),
+    builder: (context, candidates, rejected) => InkWell(
+      key: ValueKey(
+        '${completed ? 'archive' : 'incomplete-archive'}-day-${_formatTodoDate(day)}',
+      ),
+      onTap: () => onExpandedChanged(!expanded),
+      child: Container(
+        color: candidates.isEmpty ? null : const Color(0x220067c0),
+        padding: const EdgeInsets.only(top: 10, bottom: 5),
+        child: Row(
+          children: [
+            Icon(
+              expanded ? Icons.arrow_drop_down : Icons.arrow_right,
+              size: 17,
+              color: const Color(0xff666666),
+            ),
+            const SizedBox(width: 2),
+            Text(
+              _formatTodoDate(day),
+              style: const TextStyle(
+                color: Color(0xff666666),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '$count',
+              style: const TextStyle(color: Color(0xff888888), fontSize: 11),
+            ),
+          ],
+        ),
       ),
     ),
   );
 
-  Widget _buildTodoRow(TodoEntry todo, {bool completed = false}) => Column(
+  Widget _buildTodoRow(
+    TodoEntry todo, {
+    bool completed = false,
+    bool compact = false,
+  }) => Column(
     children: [
       DragTarget<TodoEntry>(
         onWillAcceptWithDetails: (details) => details.data.id != todo.id,
@@ -793,7 +893,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           before: todo,
         ),
         builder: (context, candidates, rejected) => SizedBox(
-          height: 10,
+          height: compact ? 2 : 8,
           width: double.infinity,
           child: candidates.isEmpty
               ? null
@@ -832,7 +932,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           after: todo,
         ),
         builder: (context, candidates, rejected) => SizedBox(
-          height: 10,
+          height: compact ? 2 : 8,
           width: double.infinity,
           child: candidates.isEmpty
               ? null
@@ -858,9 +958,9 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             key: ValueKey('todo-row-background-${todo.id}'),
             duration: const Duration(milliseconds: 100),
             color: _hoveredTodoId == todo.id
-                ? const Color(0xffe9e9e9)
-                : const Color(0xfff5f5f5),
-            constraints: const BoxConstraints(minHeight: 52),
+                ? const Color(0xfff3f4f6)
+                : Colors.white,
+            constraints: const BoxConstraints(minHeight: 44),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -873,7 +973,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                 const SizedBox(width: 4),
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -888,6 +988,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                               isDense: true,
                               contentPadding: EdgeInsets.symmetric(
                                 horizontal: 8,
+                                vertical: 2,
                               ),
                             ),
                             textInputAction: TextInputAction.done,
@@ -917,14 +1018,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                               ),
                             ),
                           ),
-                        Text(
-                          _formatTodoCreatedDate(todo.createdAt),
-                          key: ValueKey('todo-created-date-${todo.id}'),
-                          style: const TextStyle(
-                            color: Color(0xff888888),
-                            fontSize: 10,
-                          ),
-                        ),
                       ],
                     ),
                   ),
@@ -941,7 +1034,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                       ),
                     ),
                     onPressed: () => _requestDeleteTodo(todo),
-                    icon: const Icon(Icons.remove, size: 17),
+                    icon: const Icon(Icons.remove, size: 16),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -967,16 +1060,18 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   );
 
   Widget _buildSettingsPage() => Padding(
-    padding: const EdgeInsets.fromLTRB(36, 30, 36, 28),
+    padding: const EdgeInsets.fromLTRB(40, 36, 40, 32),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const _PageHeader(title: '设置', subtitle: '系统设置'),
+        const _PageHeader(title: '设置', subtitle: ''),
         const SizedBox(height: 28),
         Expanded(
-          child: ListView(
+          child: ListView.separated(
             padding: EdgeInsets.zero,
-            children: [
+            itemCount: 6,
+            separatorBuilder: (_, _) => const SizedBox(height: 4),
+            itemBuilder: (context, index) => [
               _SettingRow(
                 title: '开机启动',
                 subtitle: '登录 Windows 后自动启动 Remielle',
@@ -996,25 +1091,8 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                 ),
               ),
               _SettingRow(
-                title: '软件更新',
-                subtitle: '当前版本 v$_remielleVersion，手动检查 GitHub 最新版本',
-                control: OutlinedButton.icon(
-                  key: const ValueKey('check-update-button'),
-                  onPressed: _checkingForUpdate
-                      ? null
-                      : _checkForUpdateManually,
-                  icon: _checkingForUpdate
-                      ? const SizedBox.square(
-                          dimension: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.refresh, size: 16),
-                  label: const Text('检查更新'),
-                ),
-              ),
-              _SettingRow(
                 title: '启动时显示待办气泡',
-                subtitle: '桌宠启动时默认显示 Todo 气泡',
+                subtitle: '桌宠启动时默认显示待办气泡',
                 control: Switch(
                   key: const ValueKey('bubble-default-switch'),
                   value: _bubbleVisibleByDefault,
@@ -1039,7 +1117,24 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                   onChanged: _setSkipTodoDeleteConfirmation,
                 ),
               ),
-            ],
+              _SettingRow(
+                title: '软件更新',
+                subtitle: '当前版本 v$_remielleVersion，手动检查 GitHub 最新版本',
+                control: OutlinedButton.icon(
+                  key: const ValueKey('check-update-button'),
+                  onPressed: _checkingForUpdate
+                      ? null
+                      : _checkForUpdateManually,
+                  icon: _checkingForUpdate
+                      ? const SizedBox.square(
+                          dimension: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh, size: 15),
+                  label: const Text('检查更新'),
+                ),
+              ),
+            ][index],
           ),
         ),
       ],
@@ -1063,11 +1158,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
 
   Widget _buildHelpPage() => Padding(
     key: const ValueKey('help-page'),
-    padding: const EdgeInsets.fromLTRB(36, 30, 36, 28),
+    padding: const EdgeInsets.fromLTRB(40, 36, 40, 32),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const _PageHeader(title: '使用说明', subtitle: 'Remielle 操作指南'),
+        const _PageHeader(title: '使用说明', subtitle: ''),
         const SizedBox(height: 24),
         Expanded(
           child: ListView(
@@ -1099,16 +1194,20 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                 items: [
                   'Todo 页可添加、编辑、完成、恢复或删除事项，长内容会自动换行。',
                   '长按并拖动 Todo，可以调整顺序，也可以跨日期或在未完成与已完成区域之间移动。',
+                  '点击日期前的三角可展开或收起当天的已完成事项。',
                   '设置页可管理开机启动、默认显示气泡、退出行为和删除确认。',
                 ],
               ),
-              const Divider(height: 32, color: Color(0xffd6d6d6)),
+              const Divider(height: 32, color: Color(0xffe5e7eb)),
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
                   key: const ValueKey('github-repository-link'),
                   onPressed: _openGitHubRepository,
-                  icon: const Icon(Icons.open_in_new, size: 17),
+                  icon: const _GitHubIcon(
+                    key: ValueKey('github-icon'),
+                    size: 16,
+                  ),
                   label: const Text('GitHub：KawaiTsui/Remielle'),
                 ),
               ),
@@ -1130,20 +1229,24 @@ class _NavigationPane extends StatelessWidget {
   Widget build(BuildContext context) => SizedBox(
     width: 220,
     child: ColoredBox(
-      color: const Color(0xffeeeeee),
+      color: const Color(0xfff3f4f6),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 26, 14, 20),
+        padding: const EdgeInsets.fromLTRB(0, 32, 0, 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 10),
+              padding: EdgeInsets.symmetric(horizontal: 24),
               child: Text(
                 'Remielle',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xff111827),
+                ),
               ),
             ),
-            const SizedBox(height: 30),
+            const SizedBox(height: 24),
             _NavigationItem(
               key: const ValueKey('todo-tab'),
               icon: Icons.check_box_outlined,
@@ -1193,7 +1296,7 @@ class _HelpSection extends StatelessWidget {
       children: [
         Padding(
           padding: const EdgeInsets.only(top: 1),
-          child: Icon(icon, size: 20, color: const Color(0xff0067c0)),
+          child: Icon(icon, size: 19, color: const Color(0xff0078d4)),
         ),
         const SizedBox(width: 14),
         Expanded(
@@ -1259,26 +1362,39 @@ class _NavigationItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: selected ? const Color(0xffdddddd) : Colors.transparent,
-    borderRadius: const BorderRadius.all(Radius.circular(3)),
+    color: selected ? const Color(0xffeff6ff) : Colors.transparent,
     child: InkWell(
       onTap: onTap,
-      borderRadius: const BorderRadius.all(Radius.circular(3)),
       child: SizedBox(
-        height: 42,
+        height: 40,
         child: Row(
           children: [
             SizedBox(
-              width: 4,
-              height: 20,
+              width: 3,
+              height: 40,
               child: ColoredBox(
-                color: selected ? const Color(0xff0067c0) : Colors.transparent,
+                color: selected ? const Color(0xff0078d4) : Colors.transparent,
               ),
             ),
+            const SizedBox(width: 21),
+            Icon(
+              icon,
+              size: 17,
+              color: selected
+                  ? const Color(0xff0078d4)
+                  : const Color(0xff4b5563),
+            ),
             const SizedBox(width: 12),
-            Icon(icon, size: 19),
-            const SizedBox(width: 12),
-            Text(label, style: const TextStyle(fontSize: 14)),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                color: selected
+                    ? const Color(0xff0078d4)
+                    : const Color(0xff4b5563),
+              ),
+            ),
           ],
         ),
       ),
@@ -1298,15 +1414,162 @@ class _PageHeader extends StatelessWidget {
     children: [
       Text(
         title,
-        style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w600),
+        style: const TextStyle(
+          fontSize: 28,
+          fontWeight: FontWeight.w700,
+          color: Color(0xff111827),
+        ),
       ),
-      const SizedBox(height: 5),
-      Text(
-        subtitle,
-        style: const TextStyle(fontSize: 13, color: Color(0xff666666)),
-      ),
+      if (subtitle.isNotEmpty) ...[
+        const SizedBox(height: 5),
+        Text(
+          subtitle,
+          style: const TextStyle(fontSize: 13, color: Color(0xff666666)),
+        ),
+      ],
     ],
   );
+}
+
+class _UpdateDialog extends StatelessWidget {
+  const _UpdateDialog({
+    this.title = '软件更新',
+    required this.message,
+    required this.primaryLabel,
+    required this.onPrimary,
+    this.secondaryLabel,
+    this.onSecondary,
+  });
+
+  final String title;
+  final String message;
+  final String primaryLabel;
+  final VoidCallback onPrimary;
+  final String? secondaryLabel;
+  final VoidCallback? onSecondary;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasSecondary = secondaryLabel != null && onSecondary != null;
+    final primary = FilledButton(
+      onPressed: onPrimary,
+      style: FilledButton.styleFrom(
+        minimumSize: Size(hasSecondary ? 0 : 76, 40),
+        backgroundColor: const Color(0xff0078d4),
+        foregroundColor: Colors.white,
+        shape: const RoundedRectangleBorder(),
+        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+      ),
+      child: Text(primaryLabel),
+    );
+    return Dialog(
+      child: SizedBox(
+        width: 340,
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xff111827),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                message,
+                style: const TextStyle(
+                  height: 1.5,
+                  fontSize: 14,
+                  color: Color(0xff4b5563),
+                ),
+              ),
+              SizedBox(height: hasSecondary ? 24 : 20),
+              if (hasSecondary)
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: onSecondary,
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(40),
+                          foregroundColor: const Color(0xff4b5563),
+                          side: const BorderSide(color: Color(0xffe5e7eb)),
+                          shape: const RoundedRectangleBorder(),
+                          textStyle: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        child: Text(secondaryLabel!),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(child: primary),
+                  ],
+                )
+              else
+                Align(alignment: Alignment.centerRight, child: primary),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GitHubIcon extends StatelessWidget {
+  const _GitHubIcon({this.size = 16, super.key});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) =>
+      CustomPaint(size: Size.square(size), painter: const _GitHubIconPainter());
+}
+
+class _GitHubIconPainter extends CustomPainter {
+  const _GitHubIconPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(5.99959, 14.6672)
+      ..lineTo(5.99959, 12.0003)
+      ..cubicTo(5.95292, 11.587, 5.98625, 11.1669, 6.09959, 10.7669)
+      ..cubicTo(6.21293, 10.3669, 6.40628, 9.99349, 6.66629, 9.6668)
+      ..cubicTo(4.66618, 9.6668, 2.66607, 8.33336, 2.66607, 5.99984)
+      ..cubicTo(2.61171, 5.1683, 2.84733, 4.34363, 3.33277, 3.66632)
+      ..cubicTo(3.13276, 2.89959, 3.13276, 2.09953, 3.33277, 1.3328)
+      ..cubicTo(3.33277, 1.3328, 3.99948, 1.3328, 5.33288, 2.33288)
+      ..cubicTo(7.09298, 1.99952, 8.90642, 1.99952, 10.6665, 2.33288)
+      ..cubicTo(11.9999, 1.3328, 12.6666, 1.3328, 12.6666, 1.3328)
+      ..cubicTo(12.8533, 2.09953, 12.8533, 2.89959, 12.6666, 3.66632)
+      ..cubicTo(13.1533, 4.34637, 13.3867, 5.16644, 13.3333, 5.99984)
+      ..cubicTo(13.3333, 8.33336, 11.3332, 9.6668, 9.33311, 9.6668)
+      ..cubicTo(9.85309, 10.3269, 10.0926, 11.1651, 9.99981, 12.0003)
+      ..lineTo(9.99981, 14.6672)
+      ..moveTo(5.99959, 12.0003)
+      ..cubicTo(2.99275, 13.3338, 2.66621, 10.6669, 1.3328, 10.6669);
+    canvas.save();
+    canvas.scale(size.width / 16, size.height / 16);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = const Color(0xff0078d4)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..strokeCap = StrokeCap.round,
+    );
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _SettingRow extends StatelessWidget {
@@ -1322,10 +1585,8 @@ class _SettingRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    constraints: const BoxConstraints(minHeight: 76),
-    decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: Color(0xffd6d6d6))),
-    ),
+    constraints: const BoxConstraints(minHeight: 54),
+    padding: const EdgeInsets.symmetric(vertical: 4),
     child: Row(
       children: [
         Expanded(
@@ -1333,8 +1594,15 @@ class _SettingRow extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: const TextStyle(fontSize: 14)),
-              const SizedBox(height: 4),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Color(0xff111827),
+                ),
+              ),
+              const SizedBox(height: 2),
               Text(
                 subtitle,
                 style: const TextStyle(fontSize: 12, color: Color(0xff666666)),
@@ -1396,19 +1664,26 @@ class TodoEntry {
 bool _isSameDay(DateTime a, DateTime b) =>
     a.year == b.year && a.month == b.month && a.day == b.day;
 
+bool _todayTodosAreCompleted(Iterable<TodoEntry> todos, [DateTime? now]) {
+  final today = now ?? DateTime.now();
+  final todayTodos = todos.where((todo) => _isSameDay(todo.createdAt, today));
+  return todayTodos.isNotEmpty &&
+      todayTodos.every((todo) => todo.completedAt != null);
+}
+
+bool _allTodosAreCompleted(Iterable<TodoEntry> todos) {
+  final remainingTodos = todos.toList(growable: false);
+  return remainingTodos.isNotEmpty &&
+      remainingTodos.every((todo) => todo.completedAt != null);
+}
+
+Duration _timeUntilNextMidnight(DateTime now) {
+  final nextMidnight = DateTime(now.year, now.month, now.day + 1);
+  return nextMidnight.difference(now);
+}
+
 DateTime _startOfDay(DateTime value) =>
     DateTime(value.year, value.month, value.day);
-
-String _todoDayLabel(DateTime day, DateTime today) {
-  final difference = today.difference(day).inDays;
-  if (difference == 0) return '当天加入';
-  if (difference == 1) return '昨日待办';
-  return '${day.year}/${day.month}/${day.day}';
-}
-
-String _formatTodoCreatedDate(DateTime value) {
-  return _formatTodoDate(value);
-}
 
 String _formatTodoDate(DateTime value) {
   final month = value.month.toString().padLeft(2, '0');
@@ -1427,6 +1702,106 @@ class _TodoEmptyState extends StatelessWidget {
     child: Text(
       message,
       style: const TextStyle(color: Color(0xff666666), fontSize: 13),
+    ),
+  );
+}
+
+class _DeleteTodoDialog extends StatelessWidget {
+  const _DeleteTodoDialog({
+    required this.title,
+    required this.onCancelled,
+    required this.onConfirmed,
+    this.confirmKey,
+    this.accentColor = const Color(0xffffb6c1),
+  });
+
+  final String title;
+  final Key? confirmKey;
+  final Color accentColor;
+  final VoidCallback onCancelled;
+  final VoidCallback onConfirmed;
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+    backgroundColor: Colors.white,
+    surfaceTintColor: Colors.transparent,
+    insetPadding: const EdgeInsets.symmetric(horizontal: 40),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.all(Radius.circular(12)),
+    ),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 320),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '删除 Todo',
+              style: TextStyle(
+                fontFamily: 'Microsoft YaHei',
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Color(0xff4a4a4a),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              '确定要删除“$title”吗？',
+              style: const TextStyle(
+                fontFamily: 'Microsoft YaHei',
+                fontSize: 13,
+                height: 1.4,
+                color: Color(0xff4a4a4a),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: onCancelled,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: accentColor,
+                      minimumSize: const Size.fromHeight(40),
+                      side: BorderSide(color: accentColor, width: 1),
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(8)),
+                      ),
+                      textStyle: const TextStyle(
+                        fontFamily: 'Microsoft YaHei',
+                        fontSize: 13,
+                      ),
+                    ),
+                    child: const Text('取消'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    key: confirmKey,
+                    onPressed: onConfirmed,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: accentColor,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size.fromHeight(40),
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(8)),
+                      ),
+                      textStyle: const TextStyle(
+                        fontFamily: 'Microsoft YaHei',
+                        fontSize: 13,
+                      ),
+                    ),
+                    child: const Text('删除'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     ),
   );
 }
