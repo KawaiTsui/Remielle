@@ -51,7 +51,9 @@ class _UpdateService {
   static File get _sameVersionMarker =>
       File('${Directory.systemTemp.path}\\remielle-same-version-update.marker');
 
-  static Future<_UpdateInfo?> check() async {
+  static Future<_UpdateInfo?> check({
+    bool ignoreSameVersionMarker = false,
+  }) async {
     await _writeUpdateDebugLog('check started; version=$_remielleVersion');
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
@@ -93,7 +95,9 @@ class _UpdateService {
       if (url is! String || !_isNewer(version)) {
         return null;
       }
-      if (_isSameVersion(version) && await _sameVersionMarker.exists()) {
+      if (!ignoreSameVersionMarker &&
+          _isSameVersion(version) &&
+          await _sameVersionMarker.exists()) {
         await _writeUpdateDebugLog(
           'same-version marker consumed; version=$version',
         );

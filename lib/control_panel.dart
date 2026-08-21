@@ -75,6 +75,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   bool _skipTodoDeleteConfirmation = false;
   bool _bubbleVisibleByDefault = true;
   bool _autoUpdate = false;
+  bool _checkingForUpdate = false;
   bool _updatingStartup = false;
   bool _closing = false;
   bool _inputSessionActive = false;
@@ -390,6 +391,100 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   Future<void> _setAutoUpdate(bool value) async {
     setState(() => _autoUpdate = value);
     await _savePanelData();
+  }
+
+  Future<void> _checkForUpdateManually() async {
+    if (_checkingForUpdate) return;
+    setState(() => _checkingForUpdate = true);
+    final update = await _UpdateService.check(ignoreSameVersionMarker: true);
+    if (!mounted) return;
+    setState(() => _checkingForUpdate = false);
+    if (update == null) {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('软件更新'),
+          content: const Text('当前版本 v$_remielleVersion 已是最新版本。'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('发现新版本 v${update.version}'),
+        content: const Text('是否立即下载并安装更新？安装完成后软件将自动重启。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('暂不更新'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('立即更新'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final progress = ValueNotifier<double>(0);
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: Text('正在更新至 v${update.version}'),
+          content: ValueListenableBuilder<double>(
+            valueListenable: progress,
+            builder: (context, value, _) => Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('下载中 ${(value * 100).round()}%'),
+                const SizedBox(height: 12),
+                LinearProgressIndicator(value: value),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    try {
+      final archive = await _UpdateService.download(
+        update,
+        (value) => progress.value = value.clamp(0, 1),
+      );
+      if (_UpdateService._isSameVersion(update.version)) {
+        await _UpdateService.markSameVersionUpdate();
+      }
+      await _UpdateService.launchUpdater(archive);
+      progress.dispose();
+      exit(0);
+    } catch (error) {
+      progress.dispose();
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('更新失败'),
+          content: Text('无法完成更新：$error'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   Future<void> _setExitTrayOnPetExit(bool value) async {
@@ -878,49 +973,73 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       children: [
         const _PageHeader(title: '设置', subtitle: '系统设置'),
         const SizedBox(height: 28),
-        _SettingRow(
-          title: '开机启动',
-          subtitle: '登录 Windows 后自动启动 Remielle',
-          control: Switch(
-            key: const ValueKey('startup-switch'),
-            value: _launchAtStartup,
-            onChanged: _updatingStartup ? null : _setLaunchAtStartup,
-          ),
-        ),
-        _SettingRow(
-          title: '自动更新',
-          subtitle: '发现新版本后自动下载并安装，不再询问',
-          control: Switch(
-            key: const ValueKey('auto-update-switch'),
-            value: _autoUpdate,
-            onChanged: _setAutoUpdate,
-          ),
-        ),
-        _SettingRow(
-          title: '启动时显示待办气泡',
-          subtitle: '桌宠启动时默认显示 Todo 气泡',
-          control: Switch(
-            key: const ValueKey('bubble-default-switch'),
-            value: _bubbleVisibleByDefault,
-            onChanged: _setBubbleVisibleByDefault,
-          ),
-        ),
-        _SettingRow(
-          title: '退出时同时退出托盘',
-          subtitle: '从桌宠右键菜单退出时，同时结束托盘进程',
-          control: Switch(
-            key: const ValueKey('exit-tray-switch'),
-            value: _exitTrayOnPetExit,
-            onChanged: _setExitTrayOnPetExit,
-          ),
-        ),
-        _SettingRow(
-          title: '删除 Todo 时不再二次提醒',
-          subtitle: '删除 Todo 时不显示确认窗口',
-          control: Switch(
-            key: const ValueKey('skip-delete-confirmation-switch'),
-            value: _skipTodoDeleteConfirmation,
-            onChanged: _setSkipTodoDeleteConfirmation,
+        Expanded(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              _SettingRow(
+                title: '开机启动',
+                subtitle: '登录 Windows 后自动启动 Remielle',
+                control: Switch(
+                  key: const ValueKey('startup-switch'),
+                  value: _launchAtStartup,
+                  onChanged: _updatingStartup ? null : _setLaunchAtStartup,
+                ),
+              ),
+              _SettingRow(
+                title: '自动更新',
+                subtitle: '发现新版本后自动下载并安装，不再询问',
+                control: Switch(
+                  key: const ValueKey('auto-update-switch'),
+                  value: _autoUpdate,
+                  onChanged: _setAutoUpdate,
+                ),
+              ),
+              _SettingRow(
+                title: '软件更新',
+                subtitle: '当前版本 v$_remielleVersion，手动检查 GitHub 最新版本',
+                control: OutlinedButton.icon(
+                  key: const ValueKey('check-update-button'),
+                  onPressed: _checkingForUpdate
+                      ? null
+                      : _checkForUpdateManually,
+                  icon: _checkingForUpdate
+                      ? const SizedBox.square(
+                          dimension: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh, size: 16),
+                  label: const Text('检查更新'),
+                ),
+              ),
+              _SettingRow(
+                title: '启动时显示待办气泡',
+                subtitle: '桌宠启动时默认显示 Todo 气泡',
+                control: Switch(
+                  key: const ValueKey('bubble-default-switch'),
+                  value: _bubbleVisibleByDefault,
+                  onChanged: _setBubbleVisibleByDefault,
+                ),
+              ),
+              _SettingRow(
+                title: '退出时同时退出托盘',
+                subtitle: '从桌宠右键菜单退出时，同时结束托盘进程',
+                control: Switch(
+                  key: const ValueKey('exit-tray-switch'),
+                  value: _exitTrayOnPetExit,
+                  onChanged: _setExitTrayOnPetExit,
+                ),
+              ),
+              _SettingRow(
+                title: '删除 Todo 时不再二次提醒',
+                subtitle: '删除 Todo 时不显示确认窗口',
+                control: Switch(
+                  key: const ValueKey('skip-delete-confirmation-switch'),
+                  value: _skipTodoDeleteConfirmation,
+                  onChanged: _setSkipTodoDeleteConfirmation,
+                ),
+              ),
+            ],
           ),
         ),
       ],
