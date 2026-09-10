@@ -1,4 +1,4 @@
-part of 'main.dart';
+﻿part of 'main.dart';
 
 ThemeData _controlPanelTheme() {
   const accent = Color(0xff0078d4);
@@ -1354,16 +1354,18 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         ),
         childWhenDragging: Opacity(
           opacity: 0.35,
-          child: _buildTodoRowBody(todo, completed: completed),
+          child: _buildTodoRowBody(todo, completed: completed, includeSubtasks: false),
         ),
         child: DragTarget<TodoEntry>(
           onWillAcceptWithDetails: (details) =>
               details.data.id != todo.id && !completed,
           onAcceptWithDetails: (details) => _makeSubtask(details.data, todo),
           builder: (context, candidates, rejected) =>
-              _buildTodoRowBody(todo, completed: completed),
+              _buildTodoRowBody(todo, completed: completed, includeSubtasks: false),
         ),
       ),
+      if (todo.subtasks.isNotEmpty)
+        _buildControlPanelSubtasks(todo, completed),
       DragTarget<TodoEntry>(
         onWillAcceptWithDetails: (details) => details.data.id != todo.id,
         onAcceptWithDetails: (details) => _dropTodo(
@@ -1386,6 +1388,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   Widget _buildTodoRowBody(
     TodoEntry todo, {
     required bool completed,
+    bool includeSubtasks = true,
   }) => MouseRegion(
     key: ValueKey('todo-row-${todo.id}'),
     cursor: SystemMouseCursors.basic,
@@ -1543,10 +1546,10 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                           ],
                         ),
                       ),
-                    if (todo.subtasks.isNotEmpty &&
+                    if (includeSubtasks && todo.subtasks.isNotEmpty &&
                         _expandedSubtaskTodoIds.contains(todo.id))
                       _buildControlPanelSubtasks(todo, completed),
-                    if (!completed && _addingSubtaskTodoId == todo.id)
+                    if (includeSubtasks && !completed && _addingSubtaskTodoId == todo.id)
                       _buildControlPanelSubtaskEditor(todo),
                   ],
                 ),
@@ -1581,7 +1584,18 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         child: Column(
           children: todo.subtasks
               .map(
-                (subtask) => Row(
+                (subtask) => LongPressDraggable<TodoSubtaskDragData>(
+                  data: TodoSubtaskDragData(
+                    parentId: todo.id,
+                    subtaskId: subtask.id,
+                  ),
+                  delay: Duration.zero,
+                  hapticFeedbackOnStart: false,
+                  feedback: Material(
+                    color: Colors.transparent,
+                    child: Text(subtask.title),
+                  ),
+                  child: Row(
                   children: [
                     Checkbox(
                       value: subtask.isCompleted,
@@ -1614,6 +1628,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                         ),
                       ),
                   ],
+                  ),
                 ),
               )
               .toList(),
@@ -1894,7 +1909,7 @@ class _NavigationPane extends StatelessWidget {
               key: const ValueKey('all-tasks-tab'),
               icon: Icons.list_alt_outlined,
               /*
-              label: '所有任�?',
+              label: '所有任务',
               */
               label: '所有任务',
               selected: selected == _PanelSection.allTasks,
@@ -2383,7 +2398,7 @@ List<TodoEntry> materializeDueRecurringTodos(
 
 String todoRecurrenceLabel(TodoRecurrence value) => switch (value) {
   /*
-  TodoRecurrence.none => '不循�?',
+  TodoRecurrence.none => '不循环',
   */
   TodoRecurrence.none => '不循环',
   TodoRecurrence.daily => '每天',
@@ -2695,7 +2710,7 @@ class _DeleteTodoDialog extends StatelessWidget {
             const SizedBox(height: 24),
             Text(
               /*
-              '确定要删除�?title”吗�?',
+              '确定要删除“$title”吗？',
               */
               '确定要删除“$title”吗？',
               style: const TextStyle(
