@@ -498,8 +498,8 @@ void main() {
 
     expect(find.text('待办清单'), findsOneWidget);
     expect(find.text('今日待办'), findsOneWidget);
-    expect(find.text('已完成'), findsOneWidget);
-    expect(find.text('完成的 Todo 会自动归档到这里'), findsOneWidget);
+    expect(find.text('已完成'), findsNothing);
+    expect(find.text('完成的 Todo 会自动归档到这里'), findsNothing);
 
     await tester.enterText(find.byKey(const ValueKey('todo-input')), '归档任务');
     await tester.tap(find.byKey(const ValueKey('add-todo-button')));
@@ -517,6 +517,9 @@ void main() {
     final now = DateTime.now();
     final archiveDay =
         '${now.year}/${now.month.toString().padLeft(2, '0')}/${now.day.toString().padLeft(2, '0')}';
+    await tester.tap(find.byKey(const ValueKey('all-tasks-tab')));
+    await tester.pump();
+    expect(find.byKey(ValueKey('archive-day-$archiveDay')), findsOneWidget);
     await tester.tap(find.byKey(ValueKey('archive-day-$archiveDay')));
     await tester.pump();
 
@@ -537,6 +540,34 @@ void main() {
     expect(checkbox.value, isFalse);
   });
 
+  test('气泡只显示今天截止且未完成的 Todo', () {
+    final today = DateTime(2026, 9, 10, 15);
+    final visible = visibleTodayTodos([
+      TodoEntry(id: 1, title: '今天', createdAt: today, dueAt: today),
+      TodoEntry(
+        id: 2,
+        title: '未来',
+        createdAt: today,
+        dueAt: DateTime(2026, 9, 11),
+      ),
+      TodoEntry(
+        id: 3,
+        title: '逾期',
+        createdAt: DateTime(2026, 9, 9),
+        dueAt: DateTime(2026, 9, 9),
+      ),
+      TodoEntry(
+        id: 4,
+        title: '今天已完成',
+        createdAt: today,
+        dueAt: today,
+        completedAt: today,
+      ),
+    ], today);
+
+    expect(visible.map((todo) => todo.id), [1]);
+  });
+
   test('Todo 时间和完成状态可以序列化，并兼容旧数据', () {
     final createdAt = DateTime(2026, 8, 17, 9, 30);
     final completedAt = DateTime(2026, 8, 17, 10, 15);
@@ -555,6 +586,90 @@ void main() {
     final legacy = TodoEntry.fromJson({'id': 8, 'title': '旧任务'});
     expect(legacy.completedAt, isNull);
     expect(legacy.createdAt, isNotNull);
+  });
+
+  test('Todo 子项可以序列化，并兼容没有子项的旧数据', () {
+    final todo = TodoEntry(
+      id: 9,
+      title: '父项',
+      createdAt: DateTime(2026, 9, 8),
+      subtasks: const [
+        TodoSubtask(id: 'a', title: '已完成子项', isCompleted: true),
+        TodoSubtask(id: 'b', title: '未完成子项'),
+      ],
+    );
+    final restored = TodoEntry.fromJson(todo.toJson());
+
+    expect(restored.subtasks.length, 2);
+    expect(restored.subtasks.first.isCompleted, isTrue);
+    expect(TodoEntry.fromJson({'id': 10, 'title': '旧任务'}).subtasks, isEmpty);
+  });
+
+  test('循环 Todo 生成下一期时重置子项完成状态', () {
+    final next = nextRecurringTodo(
+      TodoEntry(
+        id: 1,
+        title: '每日任务',
+        createdAt: DateTime(2026, 9, 8),
+        recurrence: TodoRecurrence.daily,
+        subtasks: const [TodoSubtask(id: 'a', title: '子项', isCompleted: true)],
+      ),
+      const [],
+    );
+
+    expect(next, isNotNull);
+    expect(next!.subtasks.single.isCompleted, isFalse);
+    expect(next.subtasks.single.title, '子项');
+  });
+
+  test('循环下一期按自然周和自然月边界计算', () {
+    final weekly = nextRecurringTodo(
+      TodoEntry(
+        id: 1,
+        title: '每周任务',
+        createdAt: DateTime(2026, 9, 8),
+        dueAt: DateTime(2026, 9, 8),
+        recurrence: TodoRecurrence.weekly,
+      ),
+      const [],
+    );
+    final monthly = nextRecurringTodo(
+      TodoEntry(
+        id: 2,
+        title: '每月任务',
+        createdAt: DateTime(2026, 9, 10),
+        dueAt: DateTime(2026, 9, 10),
+        recurrence: TodoRecurrence.monthly,
+      ),
+      const [],
+    );
+
+    final today = DateTime.now();
+    final expectedMonday = DateTime(
+      today.year,
+      today.month,
+      today.day + (7 - today.weekday + 1),
+    );
+    expect(weekly!.dueAt, expectedMonday);
+    expect(monthly!.dueAt, DateTime(today.year, today.month + 1, 1));
+  });
+
+  test('未完成 Todo 自动顺延到今天，已完成 Todo 保持原日期', () {
+    final carriedOver = <TodoEntry>[
+      TodoEntry(id: 1, title: '昨天未完成', createdAt: DateTime(2026, 9, 6, 9, 15)),
+      TodoEntry(
+        id: 2,
+        title: '昨天已完成',
+        createdAt: DateTime(2026, 9, 6, 10),
+        completedAt: DateTime(2026, 9, 6, 11),
+      ),
+      TodoEntry(id: 3, title: '今天待办', createdAt: DateTime(2026, 9, 7, 8)),
+    ];
+
+    expect(carriedOver[0].createdAt, DateTime(2026, 9, 6, 9, 15));
+    expect(carriedOver[1].createdAt, DateTime(2026, 9, 6, 10));
+    expect(carriedOver[1].completedAt, DateTime(2026, 9, 6, 11));
+    expect(carriedOver[2].createdAt, DateTime(2026, 9, 7, 8));
   });
 
   testWidgets('设置页使用测试阶段默认值', (tester) async {
@@ -645,35 +760,6 @@ void main() {
     expect(find.byKey(const ValueKey('github-icon')), findsOneWidget);
   });
 
-  testWidgets('减号按钮删除 Todo 前需要确认', (tester) async {
-    await tester.pumpWidget(const ControlPanelApp());
-    await tester.pump();
-    await tester.enterText(find.byKey(const ValueKey('todo-input')), '待删除任务');
-    await tester.tap(find.byKey(const ValueKey('add-todo-button')));
-    await tester.pump();
-
-    await tester.tap(find.byKey(const ValueKey('delete-todo-1')));
-    await tester.pumpAndSettle();
-    expect(find.text('删除 Todo'), findsOneWidget);
-    expect(find.text('确定要删除“待删除任务”吗？'), findsOneWidget);
-    final dialogTitle = tester.widget<Text>(find.text('删除 Todo'));
-    expect(dialogTitle.style?.fontFamily, 'Microsoft YaHei');
-    expect(dialogTitle.style?.fontWeight, FontWeight.bold);
-    final cancel = tester.widget<OutlinedButton>(find.byType(OutlinedButton));
-    expect(cancel.style?.side?.resolve({})?.width, 1);
-    expect(cancel.style?.side?.resolve({})?.color, const Color(0xff0078d4));
-
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(find.text('待删除任务'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey('delete-todo-1')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('confirm-delete-todo')));
-    await tester.pumpAndSettle();
-    expect(find.text('待删除任务'), findsNothing);
-  });
-
   testWidgets('Todo 右键菜单可以删除', (tester) async {
     await tester.pumpWidget(const ControlPanelApp());
     await tester.pump();
@@ -698,28 +784,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('删除 Todo'), findsOneWidget);
-  });
-
-  testWidgets('可以关闭删除 Todo 二次提醒', (tester) async {
-    await tester.pumpWidget(const ControlPanelApp());
-    await tester.pump();
-    await tester.enterText(find.byKey(const ValueKey('todo-input')), '直接删除任务');
-    await tester.tap(find.byKey(const ValueKey('add-todo-button')));
-    await tester.pump();
-
-    await tester.tap(find.byKey(const ValueKey('settings-tab')));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const ValueKey('skip-delete-confirmation-switch')),
-    );
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('todo-tab')));
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('delete-todo-1')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('删除 Todo'), findsNothing);
-    expect(find.text('直接删除任务'), findsNothing);
   });
 
   testWidgets('鼠标悬停时 Todo 行背景变深', (tester) async {

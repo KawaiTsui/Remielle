@@ -208,10 +208,10 @@ try {
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
 ''');
-    final quote = (String value) => '"${value.replaceAll('"', '""')}"';
+    String quote(String value) => '"${value.replaceAll('"', '""')}"';
     await launcher.writeAsString(
       '@echo off\r\n'
-      'start "" /b powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${quote(script.path)} ${quote(archive.path)} ${quote(Platform.resolvedExecutable)} ${pid}\r\n'
+      'start "" /b powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${quote(script.path)} ${quote(archive.path)} ${quote(Platform.resolvedExecutable)} $pid\r\n'
       'del /f /q "%~f0"\r\n',
       flush: true,
     );
@@ -246,7 +246,7 @@ int _compareBubbleTodos(TodoEntry a, TodoEntry b) {
   );
   return completionOrder != 0
       ? completionOrder
-      : a.createdAt.compareTo(b.createdAt);
+      : todoSortAt(a).compareTo(todoSortAt(b));
 }
 
 class _BubbleScrollPhysics extends ClampingScrollPhysics {
@@ -295,16 +295,25 @@ Future<void> main(List<String> args) async {
   final savedPosition = savedLayout?.position;
   final savedScale = savedLayout?.scale ?? 1.0;
   final savedBubbleHeight = savedLayout?.bubbleHeight ?? _petBubbleMinHeight;
+  final windowSize = Size(
+    max(_petBubbleWidth, _petStageWidth * savedScale),
+    _petWindowHeightForLayout(savedScale, savedBubbleHeight),
+  );
+  final primaryDisplay = await screenRetriever.getPrimaryDisplay();
+  final visibleSize = primaryDisplay.visibleSize ?? primaryDisplay.size;
+  final positionUsable =
+      savedPosition != null &&
+      savedPosition.dx + windowSize.width > 0 &&
+      savedPosition.dy + windowSize.height > 0 &&
+      savedPosition.dx < visibleSize.width &&
+      savedPosition.dy < visibleSize.height;
   final options = WindowOptions(
-    size: Size(
-      max(_petBubbleWidth, _petStageWidth * savedScale),
-      _petWindowHeightForLayout(savedScale, savedBubbleHeight),
-    ),
+    size: windowSize,
     minimumSize: Size(
       max(_petBubbleWidth, _petStageWidth * _minPetScale),
       _petWindowHeightForLayout(_minPetScale, _petBubbleMinHeight),
     ),
-    center: savedPosition == null,
+    center: !positionUsable,
     backgroundColor: Colors.transparent,
     skipTaskbar: true,
     titleBarStyle: TitleBarStyle.hidden,
@@ -314,7 +323,7 @@ Future<void> main(List<String> args) async {
     await windowManager.setAsFrameless();
     await windowManager.setBackgroundColor(Colors.transparent);
     await windowManager.setResizable(false);
-    if (savedPosition == null) {
+    if (!positionUsable) {
       await windowManager.center();
     } else {
       await windowManager.setPosition(savedPosition);
@@ -512,6 +521,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   _PetAnimation _animation = _PetAnimation.normal;
   final _bubbleTodoController = TextEditingController();
+  TodoRecurrence _bubbleTodoRecurrence = TodoRecurrence.none;
   final _bubbleTodoFocusNode = FocusNode();
   bool _mouseThrough = false;
   bool _alwaysOnTop = true;
@@ -547,11 +557,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   double? _bubbleResizeStartCursorY;
   bool _bubbleResizeSampleInFlight = false;
   bool _bubbleResizeSamplePending = false;
-  double _appliedPetScale = 1.0;
-  double _appliedBubbleHeight = _petBubbleMinHeight;
-  double? _pendingLayoutScale;
-  double? _pendingLayoutBubbleHeight;
-  bool _layoutUpdateInFlight = false;
   bool _petVisible = true;
   bool _systemCaretActive = false;
   bool _caretIdleSuppressed = false;
@@ -567,23 +572,25 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   StreamSubscription<FileSystemEvent>? _updateRequestWatcher;
   bool _takingUpdateRequest = false;
   bool _showingAllTodosCompleted = false;
+  List<TodoEntry> _reminderTodos = const [];
+  Timer? _reminderTimer;
 
   @override
   void initState() {
     super.initState();
     _petScale = widget.initialPetScale.clamp(_minPetScale, _maxPetScale);
     _bubbleHeight = max(_petBubbleMinHeight, widget.initialBubbleHeight);
-    _appliedPetScale = _petScale;
-    _appliedBubbleHeight = _bubbleHeight;
     _bubbleVisible = widget.initialBubbleVisible;
     windowManager.addListener(this);
     trayManager.addListener(this);
     _initialize();
     _initializeCaretMonitoring();
     _bubbleTodoFocusNode.addListener(_handleBubbleInputFocus);
+    _bubbleTodoController.addListener(_handleBubbleTodoTextChanged);
     _refreshTodos();
     _initializeTodoWatcher();
     _scheduleMidnightArchive();
+    unawaited(_scheduleNextReminder());
     _scheduleRandomNormalEnd();
     unawaited(_checkForUpdates());
     if (Platform.isWindows && !_isFlutterTest) {
@@ -614,8 +621,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       setState(() {
         _updateInfo = update;
         _updateStatus = _UpdateStatus.available;
-        _bubbleVisible = true;
       });
+      _setBubbleVisible(true);
       if (!_petVisible) await _showPet();
       unawaited(_downloadUpdate());
     } finally {
@@ -632,8 +639,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     setState(() {
       _updateInfo = update;
       _updateStatus = _UpdateStatus.available;
-      _bubbleVisible = true;
     });
+    _setBubbleVisible(true);
     if (settings.autoUpdate) unawaited(_downloadUpdate());
   }
 
@@ -707,10 +714,57 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _todoFileWatcher?.cancel();
     _bubbleTodoFocusNode.removeListener(_handleBubbleInputFocus);
     _bubbleTodoController.dispose();
+    _reminderTimer?.cancel();
     _bubbleTodoFocusNode.dispose();
     windowManager.removeListener(this);
     trayManager.removeListener(this);
     super.dispose();
+  }
+
+  Future<void> _checkTodoReminders() async {
+    final data = await _PanelDataStore.load();
+    if (!mounted) return;
+    final now = DateTime.now();
+    final due = data.todos
+        .where((todo) => shouldShowReminder(todo, now))
+        .toList();
+    if (due.isEmpty) return;
+    final stamped = data.todos.map((todo) {
+      final match = due.any((item) => item.id == todo.id);
+      return match ? todo.copyWith(remindedAt: now) : todo;
+    }).toList();
+    await _saveBubbleTodos(data, stamped);
+    if (!mounted) return;
+    setState(() {
+      _reminderTodos = due;
+      _bubbleVisible = true;
+      _showingAllTodosCompleted = false;
+      _todos = List.unmodifiable(due);
+    });
+    await windowManager.show();
+    await windowManager.focus();
+    unawaited(_scheduleNextReminder());
+  }
+
+  Future<void> _scheduleNextReminder() async {
+    _reminderTimer?.cancel();
+    final data = await _PanelDataStore.load();
+    if (!mounted) return;
+    final now = DateTime.now();
+    final upcoming = data.todos
+        .where((todo) => todo.reminderEnabled && todo.remindedAt == null)
+        .map((todo) => todo.reminderAt ?? reminderTimeFor(todo))
+        .where((time) => time.isAfter(now))
+        .toList();
+    if (upcoming.isEmpty) return;
+    upcoming.sort();
+    _reminderTimer = Timer(upcoming.first.difference(now), () {
+      unawaited(_checkTodoReminders());
+    });
+  }
+
+  void _handleBubbleTodoTextChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -827,52 +881,21 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       _bubbleHeight = nextBubbleHeight;
     });
     if (_isFlutterTest) return;
-    _pendingLayoutScale = nextScale;
-    _pendingLayoutBubbleHeight = nextBubbleHeight;
-    unawaited(_drainLayoutUpdates());
+    _setNativeLayout(nextScale, nextBubbleHeight);
   }
 
-  Future<void> _drainLayoutUpdates() async {
-    if (_layoutUpdateInFlight) return;
-    _layoutUpdateInFlight = true;
-    try {
-      while (_pendingLayoutScale != null && mounted) {
-        final targetScale = _pendingLayoutScale!;
-        final targetBubbleHeight = _pendingLayoutBubbleHeight!;
-        _pendingLayoutScale = null;
-        _pendingLayoutBubbleHeight = null;
-        final oldWidth = max(
-          _petBubbleWidth,
-          _petStageWidth * _appliedPetScale,
-        );
-        final oldHeight = _petWindowHeightForLayout(
-          _appliedPetScale,
-          _appliedBubbleHeight,
-        );
-        final newWidth = max(_petBubbleWidth, _petStageWidth * targetScale);
-        final newHeight = _petWindowHeightForLayout(
-          targetScale,
-          targetBubbleHeight,
-        );
-        final position = await windowManager.getPosition();
-        await windowManager.setBounds(
-          Rect.fromLTWH(
-            position.dx + (oldWidth - newWidth) / 2,
-            position.dy + oldHeight - newHeight,
-            newWidth,
-            newHeight,
-          ),
-        );
-        _appliedPetScale = targetScale;
-        _appliedBubbleHeight = targetBubbleHeight;
-      }
-    } on MissingPluginException {
-      // Widget tests do not load the native window manager plugin.
-    } finally {
-      _layoutUpdateInFlight = false;
-      if (_pendingLayoutScale != null && mounted)
-        unawaited(_drainLayoutUpdates());
-    }
+  Future<void> _setNativeLayout(double scale, double bubbleHeight) async {
+    if (_isFlutterTest) return;
+    await windowManager.setSize(
+      Size(
+        max(_petBubbleWidth, _petStageWidth * scale),
+        _petWindowHeightForLayout(scale, bubbleHeight),
+      ),
+    );
+  }
+
+  void _setBubbleVisible(bool visible) {
+    if (mounted) setState(() => _bubbleVisible = visible);
   }
 
   void _resetPetScale() => _setLayoutPreview(scale: 1.0);
@@ -942,16 +965,23 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final data = await _PanelDataStore.load();
     if (!mounted) return;
     final now = DateTime.now();
-    final visibleTodos =
-        data.todos.where((todo) => _isSameDay(todo.createdAt, now)).toList()
-          ..sort(_compareBubbleTodos);
+    final visibleTodos = visibleTodayTodos(data.todos, now)
+      ..sort(_compareBubbleTodos);
     final next = List<TodoEntry>.unmodifiable(visibleTodos);
     if (_todos.length == next.length &&
         _todos.asMap().entries.every(
           (entry) =>
               entry.value.id == next[entry.key].id &&
               entry.value.title == next[entry.key].title &&
-              entry.value.completedAt == next[entry.key].completedAt,
+              entry.value.completedAt == next[entry.key].completedAt &&
+              jsonEncode(
+                    entry.value.subtasks.map((item) => item.toJson()).toList(),
+                  ) ==
+                  jsonEncode(
+                    next[entry.key].subtasks
+                        .map((item) => item.toJson())
+                        .toList(),
+                  ),
         )) {
       return;
     }
@@ -983,9 +1013,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     if (mounted) {
       final now = DateTime.now();
       setState(() {
-        final visibleTodos =
-            todos.where((todo) => _isSameDay(todo.createdAt, now)).toList()
-              ..sort(_compareBubbleTodos);
+        final visibleTodos = visibleTodayTodos(todos, now)
+          ..sort(_compareBubbleTodos);
         _todos = List.unmodifiable(visibleTodos);
       });
     }
@@ -1001,9 +1030,21 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final nextId =
         current.todos.fold<int>(0, (maxId, todo) => max(maxId, todo.id)) + 1;
     final todos = List<TodoEntry>.of(current.todos)
-      ..add(TodoEntry(id: nextId, title: title, createdAt: DateTime.now()));
+      ..add(
+        TodoEntry(
+          id: nextId,
+          title: title,
+          createdAt: DateTime.now(),
+          recurrence: _bubbleTodoRecurrence,
+          dueAt: DateTime.now(),
+          recurrenceSeriesId: _bubbleTodoRecurrence == TodoRecurrence.none
+              ? null
+              : nextId.toString(),
+        ),
+      );
     await _saveBubbleTodos(current, todos);
     _bubbleTodoController.clear();
+    _bubbleTodoRecurrence = TodoRecurrence.none;
     _bubbleTodoFocusNode.unfocus();
   }
 
@@ -1013,12 +1054,43 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final index = todos.indexWhere((item) => item.id == todo.id);
     if (index < 0) return;
     final completing = todos[index].completedAt == null;
+    final completedAt = DateTime.now();
+    final currentTodo = todos[index];
     todos[index] = completing
-        ? todos[index].copyWith(completedAt: DateTime.now())
+        ? todos[index].copyWith(
+            completedAt: completedAt,
+            subtasks: todos[index].subtasks
+                .map((item) => item.copyWith(isCompleted: true))
+                .toList(),
+          )
         : todos[index].copyWith(
-            createdAt: DateTime.now(),
+            dueAt: _startOfDay(DateTime.now()),
             clearCompletedAt: true,
+            clearGeneratedNextTodoId: true,
           );
+    if (!completing && currentTodo.generatedNextTodoId != null) {
+      final nextId = currentTodo.generatedNextTodoId;
+      todos.removeWhere(
+        (item) =>
+            item.id == nextId &&
+            item.generatedFromTodoId == currentTodo.id &&
+            item.completedAt == null &&
+            item.dueAt != null &&
+            item.dueAt!.isAfter(_startOfDay(DateTime.now())),
+      );
+    }
+    if (completing) {
+      final completedTodo = todos[index];
+      todos[index] = completedTodo.copyWith(
+        recurrenceSeriesId: completedTodo.recurrence == TodoRecurrence.none
+            ? null
+            : completedTodo.recurrenceSeriesId ?? completedTodo.id.toString(),
+        recurrenceNextEligibleAt: nextRecurringEligibleAt(
+          completedTodo,
+          completedAt,
+        ),
+      );
+    }
     await _saveBubbleTodos(current, todos);
     if (completing && mounted) {
       _playAnimation(_PetAnimation.todoDone);
@@ -1026,6 +1098,91 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
         _scheduleAllTodosCompletedCelebration();
       }
     }
+  }
+
+  Future<void> _addBubbleSubtask(TodoEntry todo, String title) async {
+    final value = title.trim();
+    if (value.isEmpty) return;
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final index = todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0 || todos[index].completedAt != null) return;
+    todos[index] = todos[index].copyWith(
+      subtasks: [
+        ...todos[index].subtasks,
+        TodoSubtask.create().copyWith(title: value),
+      ],
+    );
+    await _saveBubbleTodos(current, todos);
+  }
+
+  Future<void> _toggleBubbleSubtask(TodoEntry todo, TodoSubtask subtask) async {
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final index = todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0 || todos[index].completedAt != null) return;
+    todos[index] = todos[index].copyWith(
+      subtasks: todos[index].subtasks
+          .map(
+            (item) => item.id == subtask.id
+                ? item.copyWith(isCompleted: !item.isCompleted)
+                : item,
+          )
+          .toList(),
+    );
+    await _saveBubbleTodos(current, todos);
+  }
+
+  Future<void> _renameBubbleSubtask(
+    TodoEntry todo,
+    TodoSubtask subtask,
+    String title,
+  ) async {
+    final value = title.trim();
+    if (value.isEmpty) return;
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final index = todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    todos[index] = todos[index].copyWith(
+      subtasks: todos[index].subtasks
+          .map(
+            (item) =>
+                item.id == subtask.id ? item.copyWith(title: value) : item,
+          )
+          .toList(),
+    );
+    await _saveBubbleTodos(current, todos);
+  }
+
+  Future<void> _makeBubbleSubtask(TodoEntry dragged, TodoEntry target) async {
+    if (dragged.id == target.id || target.completedAt != null) return;
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final source = todos.indexWhere((item) => item.id == dragged.id);
+    final destination = todos.indexWhere((item) => item.id == target.id);
+    if (source < 0 || destination < 0) return;
+    final moved = [
+      TodoSubtask.fromTodo(todos[source]),
+      ...todos[source].subtasks,
+    ];
+    todos[destination] = todos[destination].copyWith(
+      subtasks: [...moved, ...todos[destination].subtasks],
+    );
+    todos.removeAt(source);
+    await _saveBubbleTodos(current, todos);
+  }
+
+  Future<void> _setBubbleTodoRecurrence(
+    TodoEntry todo,
+    TodoRecurrence recurrence,
+  ) async {
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final index = todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    todos[index] = todos[index].copyWith(recurrence: recurrence);
+    await _saveBubbleTodos(current, todos);
   }
 
   void _scheduleAllTodosCompletedCelebration() {
@@ -1038,8 +1195,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       if (!mounted) return;
       setState(() {
         _showingAllTodosCompleted = true;
-        _bubbleVisible = true;
       });
+      _setBubbleVisible(true);
       _allTodosCompletedDisplayTimer = Timer(const Duration(seconds: 5), () {
         if (!mounted) return;
         setState(() => _showingAllTodosCompleted = false);
@@ -1055,9 +1212,12 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final current = await _PanelDataStore.load();
     final items =
         current.todos
-            .where((todo) => _isSameDay(todo.createdAt, DateTime.now()))
+            .where(
+              (todo) =>
+                  _isSameDay(todo.dueAt ?? todo.createdAt, DateTime.now()),
+            )
             .toList()
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+          ..sort((a, b) => todoSortAt(a).compareTo(todoSortAt(b)));
     final from = items.indexWhere((todo) => todo.id == dragged.id);
     if (from < 0 || dragged.id == target.id) return;
     final item = items.removeAt(from);
@@ -1068,7 +1228,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final updates = <int, TodoEntry>{};
     for (var i = 0; i < items.length; i++) {
       updates[items[i].id] = items[i].copyWith(
-        createdAt: DateTime(day.year, day.month, day.day, 12, i),
+        sortOrder: DateTime(day.year, day.month, day.day, 12, i),
       );
     }
     final todos = current.todos
@@ -1086,8 +1246,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final position = overlay.globalToLocal(globalPosition);
     final selected = await showMenu<String>(
       context: context,
-      color: const Color(0xfffffbfc),
-      elevation: 6,
+      color: Colors.white,
+      elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
         side: const BorderSide(color: Color(0xfffde8ed)),
@@ -1118,7 +1278,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
             style: TextStyle(
               fontFamily: 'Microsoft YaHei',
               fontSize: 12,
-              color: Color(0xffff6f8e),
+              color: Color(0xff4a4a4a),
             ),
           ),
         ),
@@ -1174,8 +1334,13 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     final deletingIncomplete = latest.todos.any(
       (item) => item.id == todo.id && item.completedAt == null,
     );
+    final seriesId = todo.recurrenceSeriesId;
     final todos = List<TodoEntry>.of(latest.todos)
-      ..removeWhere((item) => item.id == todo.id);
+      ..removeWhere(
+        (item) =>
+            item.id == todo.id ||
+            (seriesId != null && item.recurrenceSeriesId == seriesId),
+      );
     await _saveBubbleTodos(latest, todos);
     if (deletingIncomplete && _allTodosAreCompleted(todos) && mounted) {
       _playAnimation(_PetAnimation.todoDone);
@@ -1480,7 +1645,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
         !_pointerDragging &&
         !_longPressTriggered) {
       _playAnimation(_PetAnimation.tap);
-      setState(() => _bubbleVisible = !_bubbleVisible);
+      _setBubbleVisible(!_bubbleVisible);
     }
     _resetPointerGesture();
   }
@@ -1674,15 +1839,28 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
                             height: _bubbleHeight,
                             todos: _todos,
                             showAllTodosCompleted: _showingAllTodosCompleted,
+                            reminderActive: _reminderTodos.isNotEmpty,
+                            onReminderConfirmed: () {
+                              setState(() => _reminderTodos = const []);
+                              unawaited(_refreshTodos());
+                            },
                             controller: _bubbleTodoController,
+                            recurrence: _bubbleTodoRecurrence,
+                            onRecurrenceChanged: (value) =>
+                                setState(() => _bubbleTodoRecurrence = value),
                             focusNode: _bubbleTodoFocusNode,
                             onAdd: _addBubbleTodo,
                             onBlankTap: _addBubbleTodo,
                             onClose: () {
                               _bubbleTodoFocusNode.unfocus();
-                              setState(() => _bubbleVisible = false);
+                              _setBubbleVisible(false);
                             },
                             onToggle: _toggleBubbleTodo,
+                            onAddSubtask: _addBubbleSubtask,
+                            onToggleSubtask: _toggleBubbleSubtask,
+                            onRenameSubtask: _renameBubbleSubtask,
+                            onMakeSubtask: _makeBubbleSubtask,
+                            onTodoRecurrenceChanged: _setBubbleTodoRecurrence,
                             onReorder: _reorderBubbleTodo,
                             onMenu: _showBubbleTodoMenu,
                             onEdit: _renameBubbleTodo,
@@ -1937,12 +2115,21 @@ class _TodoSpeechBubble extends StatefulWidget {
     required this.height,
     required this.todos,
     required this.showAllTodosCompleted,
+    required this.reminderActive,
+    required this.onReminderConfirmed,
     required this.controller,
     required this.focusNode,
+    required this.recurrence,
     required this.onAdd,
     required this.onBlankTap,
     required this.onClose,
     required this.onToggle,
+    required this.onAddSubtask,
+    required this.onToggleSubtask,
+    required this.onRenameSubtask,
+    required this.onMakeSubtask,
+    required this.onTodoRecurrenceChanged,
+    required this.onRecurrenceChanged,
     required this.onReorder,
     required this.onMenu,
     required this.onEdit,
@@ -1957,12 +2144,22 @@ class _TodoSpeechBubble extends StatefulWidget {
   final double height;
   final List<TodoEntry> todos;
   final bool showAllTodosCompleted;
+  final bool reminderActive;
+  final VoidCallback onReminderConfirmed;
   final TextEditingController controller;
   final FocusNode focusNode;
+  final TodoRecurrence recurrence;
+  final ValueChanged<TodoRecurrence> onRecurrenceChanged;
   final VoidCallback onAdd;
   final VoidCallback onBlankTap;
   final VoidCallback onClose;
   final ValueChanged<TodoEntry> onToggle;
+  final Future<void> Function(TodoEntry, String) onAddSubtask;
+  final Future<void> Function(TodoEntry, TodoSubtask) onToggleSubtask;
+  final Future<void> Function(TodoEntry, TodoSubtask, String) onRenameSubtask;
+  final Future<void> Function(TodoEntry, TodoEntry) onMakeSubtask;
+  final Future<void> Function(TodoEntry, TodoRecurrence)
+  onTodoRecurrenceChanged;
   final Future<void> Function(TodoEntry, TodoEntry, bool) onReorder;
   final void Function(TodoEntry, Offset, VoidCallback) onMenu;
   final Future<void> Function(TodoEntry, String) onEdit;
@@ -1981,6 +2178,15 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
   final _editController = TextEditingController();
   final _editFocusNode = FocusNode();
   int? _editingTodoId;
+  final Set<int> _addingSubtaskTodoIds = <int>{};
+
+  void _startAddingSubtask(TodoEntry todo) =>
+      setState(() => _addingSubtaskTodoIds.add(todo.id));
+
+  Future<void> _finishAddingSubtask(TodoEntry todo, String title) async {
+    setState(() => _addingSubtaskTodoIds.remove(todo.id));
+    await widget.onAddSubtask(todo, title);
+  }
 
   _UpdateInfo? get updateInfo => widget.updateInfo;
   _UpdateStatus get updateStatus => widget.updateStatus;
@@ -1991,6 +2197,11 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
   List<TodoEntry> get todos => widget.todos;
   TextEditingController get controller => widget.controller;
   FocusNode get focusNode => widget.focusNode;
+  TodoRecurrence get recurrence => widget.recurrence;
+  ValueChanged<TodoRecurrence> get onRecurrenceChanged =>
+      widget.onRecurrenceChanged;
+  Future<void> Function(TodoEntry, TodoRecurrence)
+  get onTodoRecurrenceChanged => widget.onTodoRecurrenceChanged;
   VoidCallback get onAdd => widget.onAdd;
   VoidCallback get onBlankTap => widget.onBlankTap;
   VoidCallback get onClose => widget.onClose;
@@ -2081,7 +2292,7 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
     return Listener(
       behavior: HitTestBehavior.opaque,
       onPointerUp: (event) {
-        if (focusNode.hasFocus || _editFocusNode.hasFocus) return;
+        if (_editFocusNode.hasFocus) return;
         final p = event.localPosition;
         if (p.dy <= 24) return;
         final inHeaderClose = p.dx >= 250 && p.dy <= 42;
@@ -2112,41 +2323,51 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SizedBox(
-                    height: 18,
-                    child: Row(
-                      children: [
-                        const Expanded(
-                          child: Text(
-                            '今日待办✨️',
-                            style: TextStyle(
-                              fontFamily: 'Microsoft YaHei',
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xff4a4a4a),
+                  if (widget.reminderActive)
+                    SizedBox(
+                      width: double.infinity,
+                      height: 32,
+                      child: FilledButton(
+                        onPressed: widget.onReminderConfirmed,
+                        child: const Text('确认'),
+                      ),
+                    )
+                  else
+                    SizedBox(
+                      height: 18,
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              '今日待办✨️',
+                              style: TextStyle(
+                                fontFamily: 'Microsoft YaHei',
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xff4a4a4a),
+                              ),
                             ),
                           ),
-                        ),
-                        Listener(
-                          onPointerUp: (_) => unawaited(_closeBubble()),
-                          child: Container(
-                            width: 18,
-                            height: 18,
-                            decoration: const BoxDecoration(
-                              color: Color(0xfffff0f3),
-                              shape: BoxShape.circle,
-                            ),
-                            alignment: Alignment.center,
-                            child: const Icon(
-                              Icons.close,
-                              size: 9,
-                              color: Color(0xffff8fa4),
+                          Listener(
+                            onPointerUp: (_) => unawaited(_closeBubble()),
+                            child: Container(
+                              width: 18,
+                              height: 18,
+                              decoration: const BoxDecoration(
+                                color: Color(0xfffff0f3),
+                                shape: BoxShape.circle,
+                              ),
+                              alignment: Alignment.center,
+                              child: const Icon(
+                                Icons.close,
+                                size: 9,
+                                color: Color(0xffff8fa4),
+                              ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
                   const SizedBox(height: 16),
                   if (updateStatus != _UpdateStatus.idle)
                     _UpdateNotice(
@@ -2163,7 +2384,41 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                       behavior: ScrollConfiguration.of(
                         context,
                       ).copyWith(scrollbars: false),
-                      child: widget.showAllTodosCompleted
+                      child: widget.reminderActive
+                          ? Column(
+                              children: [
+                                const Text('今天还有任务没完成哦！'),
+                                const SizedBox(height: 8),
+                                Expanded(
+                                  child: ListView.builder(
+                                    itemCount: todos.length,
+                                    itemBuilder: (context, index) =>
+                                        _TodoBubbleRow(
+                                          todo: todos[index],
+                                          editing: false,
+                                          editController: _editController,
+                                          editFocusNode: _editFocusNode,
+                                          onEditTap: () {},
+                                          onEditSubmitted: () {},
+                                          onEditTapOutside: (_) {},
+                                          onBlankTap: onBlankTap,
+                                          onToggle: () =>
+                                              onToggle(todos[index]),
+                                          addingSubtask: false,
+                                          onAddSubtask: () {},
+                                          onSubmitSubtask: (_) async {},
+                                          onToggleSubtask: (_) async {},
+                                          onRenameSubtask: (_, _) async {},
+                                          onMakeSubtask: (_) async {},
+                                          onRecurrenceChanged: (_) {},
+                                          onMenu: (_) {},
+                                          onReorder: widget.onReorder,
+                                        ),
+                                  ),
+                                ),
+                              ],
+                            )
+                          : widget.showAllTodosCompleted
                           ? const _BubbleEmptyPlaceholder(
                               title: '今天所有任务都完成啦~',
                               subtitle: '辛苦了，休息一下吧 🌸',
@@ -2171,32 +2426,50 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                             )
                           : todos.isEmpty
                           ? const _BubbleEmptyPlaceholder()
-                          : ListView.separated(
-                              physics: const _BubbleScrollPhysics(),
-                              padding: EdgeInsets.zero,
-                              itemCount: todos.length,
-                              itemBuilder: (context, index) {
-                                final todo = todos[index];
-                                return _TodoBubbleRow(
-                                  todo: todo,
-                                  editing: _editingTodoId == todo.id,
-                                  editController: _editController,
-                                  editFocusNode: _editFocusNode,
-                                  onEditTap: () => _startEditing(todo),
-                                  onEditSubmitted: _finishEditing,
-                                  onEditTapOutside: (_) => _finishEditing(),
-                                  onBlankTap: onBlankTap,
-                                  onToggle: () => onToggle(todo),
-                                  onMenu: (position) => onMenu(
-                                    todo,
-                                    position,
-                                    () => unawaited(_startEditing(todo)),
-                                  ),
-                                  onReorder: widget.onReorder,
-                                );
-                              },
-                              separatorBuilder: (_, _) =>
-                                  const SizedBox(height: 10),
+                          : GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: onBlankTap,
+                              child: ListView.separated(
+                                physics: const _BubbleScrollPhysics(),
+                                padding: EdgeInsets.zero,
+                                itemCount: todos.length,
+                                itemBuilder: (context, index) {
+                                  final todo = todos[index];
+                                  return _TodoBubbleRow(
+                                    todo: todo,
+                                    editing: _editingTodoId == todo.id,
+                                    editController: _editController,
+                                    editFocusNode: _editFocusNode,
+                                    onEditTap: () => _startEditing(todo),
+                                    onEditSubmitted: _finishEditing,
+                                    onEditTapOutside: (_) => _finishEditing(),
+                                    onBlankTap: onBlankTap,
+                                    onToggle: () => onToggle(todo),
+                                    addingSubtask: _addingSubtaskTodoIds
+                                        .contains(todo.id),
+                                    onAddSubtask: () =>
+                                        _startAddingSubtask(todo),
+                                    onSubmitSubtask: (title) =>
+                                        _finishAddingSubtask(todo, title),
+                                    onToggleSubtask: (subtask) =>
+                                        widget.onToggleSubtask(todo, subtask),
+                                    onRenameSubtask: (subtask, title) => widget
+                                        .onRenameSubtask(todo, subtask, title),
+                                    onMakeSubtask: (dragged) =>
+                                        widget.onMakeSubtask(dragged, todo),
+                                    onRecurrenceChanged: (value) =>
+                                        onTodoRecurrenceChanged(todo, value),
+                                    onMenu: (position) => onMenu(
+                                      todo,
+                                      position,
+                                      () => unawaited(_startEditing(todo)),
+                                    ),
+                                    onReorder: widget.onReorder,
+                                  );
+                                },
+                                separatorBuilder: (_, _) =>
+                                    const SizedBox(height: 10),
+                              ),
                             ),
                     ),
                   ),
@@ -2214,21 +2487,33 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                               color: const Color(0xfffff0f3),
                               borderRadius: BorderRadius.circular(8),
                             ),
-                            child: TextField(
-                              controller: controller,
-                              focusNode: focusNode,
-                              onSubmitted: (_) => onAdd(),
-                              textInputAction: TextInputAction.done,
-                              style: const TextStyle(
-                                fontFamily: 'Microsoft YaHei',
-                                fontSize: 12,
-                                color: Color(0xff4a4a4a),
-                              ),
-                              decoration: const InputDecoration(
-                                border: InputBorder.none,
-                                isDense: true,
-                                contentPadding: EdgeInsets.zero,
-                              ),
+                            child: Stack(
+                              alignment: Alignment.centerRight,
+                              children: [
+                                TextField(
+                                  controller: controller,
+                                  focusNode: focusNode,
+                                  onSubmitted: (_) => onAdd(),
+                                  textInputAction: TextInputAction.done,
+                                  style: const TextStyle(
+                                    fontFamily: 'Microsoft YaHei',
+                                    fontSize: 12,
+                                    color: Color(0xff4a4a4a),
+                                  ),
+                                  decoration: const InputDecoration(
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.only(right: 28),
+                                  ),
+                                ),
+                                if (controller.text.isNotEmpty)
+                                  _RecurrenceInputButton(
+                                    visible: true,
+                                    value: recurrence,
+                                    onChanged: onRecurrenceChanged,
+                                    bubbleStyle: true,
+                                  ),
+                              ],
                             ),
                           ),
                         ),
@@ -2381,6 +2666,13 @@ class _TodoBubbleRow extends StatelessWidget {
     required this.onEditTapOutside,
     required this.onBlankTap,
     required this.onToggle,
+    required this.addingSubtask,
+    required this.onAddSubtask,
+    required this.onSubmitSubtask,
+    required this.onToggleSubtask,
+    required this.onRenameSubtask,
+    required this.onMakeSubtask,
+    required this.onRecurrenceChanged,
     required this.onMenu,
     required this.onReorder,
   });
@@ -2394,6 +2686,13 @@ class _TodoBubbleRow extends StatelessWidget {
   final TapRegionCallback onEditTapOutside;
   final VoidCallback onBlankTap;
   final VoidCallback onToggle;
+  final bool addingSubtask;
+  final VoidCallback onAddSubtask;
+  final Future<void> Function(String) onSubmitSubtask;
+  final Future<void> Function(TodoSubtask) onToggleSubtask;
+  final Future<void> Function(TodoSubtask, String) onRenameSubtask;
+  final Future<void> Function(TodoEntry) onMakeSubtask;
+  final ValueChanged<TodoRecurrence> onRecurrenceChanged;
   final ValueChanged<Offset> onMenu;
   final Future<void> Function(TodoEntry, TodoEntry, bool) onReorder;
 
@@ -2431,15 +2730,9 @@ class _TodoBubbleRow extends StatelessWidget {
           ),
           childWhenDragging: Opacity(opacity: 0.35, child: _buildRow(context)),
           child: DragTarget<TodoEntry>(
-            onWillAcceptWithDetails: (details) => details.data.id != todo.id,
-            onAcceptWithDetails: (details) {
-              final box =
-                  targetKey.currentContext?.findRenderObject() as RenderBox?;
-              final placeAfter = box == null
-                  ? false
-                  : box.globalToLocal(details.offset).dy >= box.size.height / 2;
-              onReorder(details.data, todo, placeAfter);
-            },
+            onWillAcceptWithDetails: (details) =>
+                details.data.id != todo.id && todo.completedAt == null,
+            onAcceptWithDetails: (details) => onMakeSubtask(details.data),
             builder: (context, candidates, rejected) =>
                 SizedBox(key: targetKey, child: _buildRow(context)),
           ),
@@ -2480,93 +2773,296 @@ class _TodoBubbleRow extends StatelessWidget {
                   : const Color(0xff4a4a4a),
               decoration: completed ? TextDecoration.lineThrough : null,
             );
-            final painter = TextPainter(
-              text: TextSpan(text: todo.title, style: textStyle),
-              textDirection: Directionality.of(context),
-            )..layout(maxWidth: constraints.maxWidth - 26);
-            final textHitWidth = min(constraints.maxWidth, 26 + painter.width);
-            return Listener(
-              onPointerUp: (event) {
-                if (event.localPosition.dx > textHitWidth) onBlankTap();
-              },
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: onToggle,
-                    child: Container(
-                      width: 18,
-                      height: 18,
-                      decoration: BoxDecoration(
-                        color: completed
-                            ? const Color(0xffffb6c1)
-                            : Colors.white,
-                        border: completed
-                            ? null
-                            : Border.all(
-                                color: const Color(0xffffb6c1),
-                                width: 1.5,
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onToggle,
+                  child: Container(
+                    width: 18,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      color: completed ? const Color(0xffffb6c1) : Colors.white,
+                      border: completed
+                          ? null
+                          : Border.all(
+                              color: const Color(0xffffb6c1),
+                              width: 1.5,
+                            ),
+                      shape: BoxShape.circle,
+                    ),
+                    alignment: Alignment.center,
+                    child: completed
+                        ? const Icon(Icons.check, size: 10, color: Colors.white)
+                        : null,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      editing
+                          ? TextSelectionTheme(
+                              data: TextSelectionTheme.of(context).copyWith(
+                                selectionColor: const Color(0xffffb6c1),
                               ),
-                        shape: BoxShape.circle,
-                      ),
-                      alignment: Alignment.center,
-                      child: completed
-                          ? const Icon(
-                              Icons.check,
-                              size: 10,
-                              color: Colors.white,
+                              child: TextField(
+                                key: ValueKey('bubble-edit-todo-${todo.id}'),
+                                controller: editController,
+                                focusNode: editFocusNode,
+                                onSubmitted: (_) => onEditSubmitted(),
+                                onTapOutside: onEditTapOutside,
+                                textInputAction: TextInputAction.done,
+                                minLines: 1,
+                                maxLines: null,
+                                style: const TextStyle(
+                                  fontFamily: 'Microsoft YaHei',
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: Color(0xff4a4a4a),
+                                ),
+                                decoration: const InputDecoration(
+                                  border: InputBorder.none,
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                              ),
                             )
-                          : null,
+                          : GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: onEditTap,
+                              child: Wrap(
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                spacing: 4,
+                                children: [
+                                  Text(
+                                    todo.title,
+                                    softWrap: true,
+                                    style: textStyle,
+                                  ),
+                                  if (todo.recurrence != TodoRecurrence.none)
+                                    _RecurrenceInputButton(
+                                      visible: true,
+                                      value: todo.recurrence,
+                                      onChanged: onRecurrenceChanged,
+                                      bubbleStyle: true,
+                                    ),
+                                ],
+                              ),
+                            ),
+                      if (todo.subtasks.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 5),
+                          child: Column(
+                            children: todo.subtasks
+                                .map(
+                                  (subtask) => _BubbleSubtaskRow(
+                                    key: ValueKey(
+                                      'bubble-subtask-${todo.id}-${subtask.id}',
+                                    ),
+                                    subtask: subtask,
+                                    parentCompleted: completed,
+                                    onToggle: () => onToggleSubtask(subtask),
+                                    onRename: (value) =>
+                                        onRenameSubtask(subtask, value),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                      if (addingSubtask)
+                        _BubbleNewSubtaskEditor(
+                          key: ValueKey('bubble-new-subtask-${todo.id}'),
+                          onSubmitted: onSubmitSubtask,
+                        ),
+                    ],
+                  ),
+                ),
+                if (!completed)
+                  SizedBox.square(
+                    dimension: 18,
+                    child: IconButton(
+                      key: ValueKey('bubble-add-subtask-${todo.id}'),
+                      tooltip: '添加子项',
+                      padding: EdgeInsets.zero,
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.transparent,
+                        overlayColor: const Color(0xfffff0f3),
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: BorderRadius.all(Radius.circular(8)),
+                          side: BorderSide(color: Color(0xfffde8ed)),
+                        ),
+                      ),
+                      onPressed: onAddSubtask,
+                      icon: const Icon(
+                        Icons.add,
+                        size: 14,
+                        color: Color(0xffff8fa4),
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: editing
-                        ? TextSelectionTheme(
-                            data: TextSelectionTheme.of(
-                              context,
-                            ).copyWith(selectionColor: const Color(0xffffb6c1)),
-                            child: TextField(
-                              key: ValueKey('bubble-edit-todo-${todo.id}'),
-                              controller: editController,
-                              focusNode: editFocusNode,
-                              onSubmitted: (_) => onEditSubmitted(),
-                              onTapOutside: onEditTapOutside,
-                              textInputAction: TextInputAction.done,
-                              minLines: 1,
-                              maxLines: null,
-                              style: const TextStyle(
-                                fontFamily: 'Microsoft YaHei',
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: Color(0xff4a4a4a),
-                              ),
-                              decoration: const InputDecoration(
-                                border: InputBorder.none,
-                                isDense: true,
-                                contentPadding: EdgeInsets.zero,
-                              ),
-                            ),
-                          )
-                        : GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: onEditTap,
-                            child: Text(
-                              todo.title,
-                              softWrap: true,
-                              style: textStyle,
-                            ),
-                          ),
-                  ),
-                ],
-              ),
+              ],
             );
           },
         ),
       ),
     );
   }
+}
+
+class _BubbleSubtaskRow extends StatefulWidget {
+  const _BubbleSubtaskRow({
+    super.key,
+    required this.subtask,
+    required this.parentCompleted,
+    required this.onToggle,
+    required this.onRename,
+  });
+
+  final TodoSubtask subtask;
+  final bool parentCompleted;
+  final VoidCallback onToggle;
+  final ValueChanged<String> onRename;
+
+  @override
+  State<_BubbleSubtaskRow> createState() => _BubbleSubtaskRowState();
+}
+
+class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.subtask.title,
+  );
+
+  @override
+  void didUpdateWidget(covariant _BubbleSubtaskRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_controller.selection.isValid &&
+        _controller.text != widget.subtask.title) {
+      _controller.text = widget.subtask.title;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 3),
+    child: Row(
+      children: [
+        GestureDetector(
+          onTap: widget.parentCompleted ? null : widget.onToggle,
+          child: Container(
+            width: 14,
+            height: 14,
+            decoration: BoxDecoration(
+              color: widget.subtask.isCompleted
+                  ? const Color(0xffffb6c1)
+                  : Colors.white,
+              border: widget.subtask.isCompleted
+                  ? null
+                  : Border.all(color: const Color(0xffffb6c1), width: 1.5),
+              shape: BoxShape.circle,
+            ),
+            child: widget.subtask.isCompleted
+                ? const Icon(Icons.check, size: 8, color: Colors.white)
+                : null,
+          ),
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: widget.parentCompleted
+              ? Text(
+                  widget.subtask.title,
+                  style: const TextStyle(
+                    fontFamily: 'Microsoft YaHei',
+                    fontSize: 11,
+                    color: Color(0xff9ca3af),
+                    decoration: TextDecoration.lineThrough,
+                  ),
+                )
+              : TextField(
+                  controller: _controller,
+                  onChanged: widget.onRename,
+                  onSubmitted: widget.onRename,
+                  style: TextStyle(
+                    fontFamily: 'Microsoft YaHei',
+                    fontSize: 11,
+                    color: widget.subtask.isCompleted
+                        ? const Color(0xff9ca3af)
+                        : const Color(0xff4a4a4a),
+                    decoration: widget.subtask.isCompleted
+                        ? TextDecoration.lineThrough
+                        : null,
+                  ),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: InputBorder.none,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _BubbleNewSubtaskEditor extends StatefulWidget {
+  const _BubbleNewSubtaskEditor({super.key, required this.onSubmitted});
+
+  final Future<void> Function(String) onSubmitted;
+
+  @override
+  State<_BubbleNewSubtaskEditor> createState() =>
+      _BubbleNewSubtaskEditorState();
+}
+
+class _BubbleNewSubtaskEditorState extends State<_BubbleNewSubtaskEditor> {
+  final _controller = TextEditingController();
+  String _value = '';
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 5),
+    child: Row(
+      children: [
+        const SizedBox(width: 21),
+        Expanded(
+          child: TextField(
+            key: const ValueKey('bubble-new-subtask-input'),
+            autofocus: true,
+            controller: _controller,
+            onChanged: (value) => _value = value,
+            onSubmitted: widget.onSubmitted,
+            onTapOutside: (_) => widget.onSubmitted(_value),
+            textInputAction: TextInputAction.done,
+            style: const TextStyle(
+              fontFamily: 'Microsoft YaHei',
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: Color(0xff4a4a4a),
+            ),
+            decoration: const InputDecoration(
+              border: InputBorder.none,
+              isDense: true,
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 class _BubbleEmptyPlaceholder extends StatelessWidget {

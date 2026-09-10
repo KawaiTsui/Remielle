@@ -86,7 +86,9 @@ class ControlPanelApp extends StatelessWidget {
   );
 }
 
-enum _PanelSection { todo, settings, help }
+enum _PanelSection { todo, allTasks, settings, help }
+
+enum _TodoView { today, planned }
 
 class ControlPanelPage extends StatefulWidget {
   const ControlPanelPage({super.key});
@@ -104,20 +106,29 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   final _todoScrollController = ScrollController();
   final _todos = <TodoEntry>[];
   _PanelSection _section = _PanelSection.todo;
+  _TodoView _todoView = _TodoView.today;
   int _nextTodoId = 1;
   bool _launchAtStartup = false;
   bool _exitTrayOnPetExit = true;
   bool _skipTodoDeleteConfirmation = false;
   bool _bubbleVisibleByDefault = true;
   bool _autoUpdate = false;
+  TodoRecurrence _newTodoRecurrence = TodoRecurrence.none;
+  int? _newTodoReminderOffsetMinutes;
+  DateTime? _newTodoReminderAt;
+  DateTime _newTodoDueAt = _startOfDay(DateTime.now());
   bool _checkingForUpdate = false;
   bool _updatingStartup = false;
   bool _closing = false;
   bool _inputSessionActive = false;
   int? _hoveredTodoId;
   int? _editingTodoId;
+  int? _addingSubtaskTodoId;
+  String _pendingSubtaskTitle = '';
+  final Set<int> _expandedSubtaskTodoIds = <int>{};
   final Set<DateTime> _expandedArchiveDays = <DateTime>{};
   final Set<DateTime> _expandedIncompleteArchiveDays = <DateTime>{};
+  final Set<DateTime> _expandedPlannedDays = <DateTime>{};
   StreamSubscription<FileSystemEvent>? _todoFileWatcher;
   Timer? _todoRefreshDebounce;
   Timer? _midnightArchiveRefreshTimer;
@@ -127,6 +138,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     super.initState();
     windowManager.addListener(this);
     _todoFocusNode.addListener(_onInputFocusChanged);
+    _todoController.addListener(_onTodoInputChanged);
     _editFocusNode.addListener(_onInputFocusChanged);
     _initializePanel();
     _initializeTodoWatcher();
@@ -162,6 +174,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     _midnightArchiveRefreshTimer?.cancel();
     windowManager.removeListener(this);
     _todoFocusNode.removeListener(_onInputFocusChanged);
+    _todoController.removeListener(_onTodoInputChanged);
     _editFocusNode.removeListener(_onInputFocusChanged);
     _todoFocusNode.dispose();
     _editFocusNode.dispose();
@@ -206,7 +219,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     _midnightArchiveRefreshTimer = Timer(
       _timeUntilNextMidnight(DateTime.now()),
       () {
-        if (mounted) setState(() {});
+        unawaited(_refreshTodosFromDisk());
         _scheduleMidnightArchiveRefresh();
       },
     );
@@ -218,6 +231,10 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       _inputSessionActive = true;
       _sendPetEvent('inputFocus');
     }
+  }
+
+  void _onTodoInputChanged() {
+    if (mounted) setState(() {});
   }
 
   void _endInputSession() {
@@ -233,19 +250,119 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     if (value.isEmpty) return;
     setState(() {
       _todos.add(
-        TodoEntry(id: _nextTodoId++, title: value, createdAt: DateTime.now()),
+        TodoEntry(
+          id: _nextTodoId++,
+          title: value,
+          createdAt: DateTime.now(),
+          dueAt: _newTodoDueAt,
+          recurrence: _newTodoRecurrence,
+          reminderEnabled: _newTodoReminderOffsetMinutes != null,
+          reminderOffsetMinutes: _newTodoReminderOffsetMinutes,
+          reminderAt: _newTodoReminderAt,
+          recurrenceSeriesId: _newTodoRecurrence == TodoRecurrence.none
+              ? null
+              : _nextTodoId.toString(),
+        ),
       );
       _todoController.clear();
+      _newTodoRecurrence = TodoRecurrence.none;
+      _newTodoReminderOffsetMinutes = null;
+      _newTodoReminderAt = null;
+      _newTodoDueAt = _startOfDay(DateTime.now());
     });
     _savePanelData();
+  }
+
+  Future<void> _pickNewTodoDueDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _newTodoDueAt,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked != null && mounted) {
+      setState(() => _newTodoDueAt = _startOfDay(picked));
+    }
+  }
+
+  Future<void> _setReminderPreset({
+    TodoEntry? todo,
+    required String value,
+  }) async {
+    final now = DateTime.now();
+    DateTime? at;
+    if (value == 'later') {
+      at = DateTime(now.year, now.month, now.day, now.hour + 3);
+    }
+    if (value == 'tomorrow') {
+      final d = now.add(const Duration(days: 1));
+      at = DateTime(d.year, d.month, d.day, 9);
+    }
+    if (value == 'nextWeek') {
+      final d = now.add(Duration(days: 8 - now.weekday));
+      at = DateTime(d.year, d.month, d.day, 9);
+    }
+    if (value == 'custom') {
+      final date = await showDatePicker(
+        context: context,
+        initialDate: now,
+        firstDate: now,
+        lastDate: DateTime(2100),
+      );
+      if (date == null || !mounted) return;
+      await Future<void>.delayed(Duration.zero);
+      if (!mounted) return;
+      final time = await showTimePicker(
+        context: context,
+        initialTime: TimeOfDay.fromDateTime(now),
+      );
+      if (time == null || !mounted) return;
+      at = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    }
+    if (at == null) return;
+    if (todo == null) {
+      setState(() {
+        _newTodoReminderAt = at;
+        _newTodoReminderOffsetMinutes = 0;
+      });
+    } else {
+      final index = _todos.indexWhere((item) => item.id == todo.id);
+      if (index < 0) return;
+      setState(
+        () => _todos[index] = _todos[index].copyWith(
+          reminderEnabled: true,
+          reminderOffsetMinutes: 0,
+          reminderAt: at,
+          clearRemindedAt: true,
+        ),
+      );
+      await _savePanelData();
+    }
+  }
+
+  String _laterReminderLabel() {
+    final now = DateTime.now();
+    final hour = now.hour + 3;
+    return '${(hour % 24).toString().padLeft(2, '0')}:00';
   }
 
   Future<void> _completeTodo(TodoEntry todo) async {
     if (_editingTodoId == todo.id) _cancelEditing();
     final index = _todos.indexWhere((item) => item.id == todo.id);
     if (index < 0) return;
+    final completedAt = DateTime.now();
     setState(() {
-      _todos[index] = todo.copyWith(completedAt: DateTime.now());
+      final completedTodo = todo.copyWith(
+        completedAt: completedAt,
+        recurrenceSeriesId: todo.recurrence == TodoRecurrence.none
+            ? null
+            : todo.recurrenceSeriesId ?? todo.id.toString(),
+        recurrenceNextEligibleAt: nextRecurringEligibleAt(todo, completedAt),
+        subtasks: todo.subtasks
+            .map((subtask) => subtask.copyWith(isCompleted: true))
+            .toList(),
+      );
+      _todos[index] = completedTodo;
     });
     await _savePanelData();
     await _sendPetEvent(
@@ -257,10 +374,13 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     final index = _todos.indexWhere((item) => item.id == todo.id);
     if (index < 0) return;
     setState(() {
-      _todos[index] = todo.copyWith(
-        createdAt: DateTime.now(),
-        clearCompletedAt: true,
-      );
+      final restoredIndex = _todos.indexWhere((item) => item.id == todo.id);
+      if (restoredIndex >= 0) {
+        _todos[restoredIndex] = _todos[restoredIndex].copyWith(
+          clearCompletedAt: true,
+          clearGeneratedNextTodoId: true,
+        );
+      }
     });
     await _savePanelData();
   }
@@ -279,11 +399,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             .where(
               (todo) =>
                   (todo.completedAt != null) == completed &&
-                  _isSameDay(todo.createdAt, targetDay) &&
+                  _isSameDay(todo.dueAt ?? todo.createdAt, targetDay) &&
                   todo.id != dragged.id,
             )
             .toList()
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+          ..sort((a, b) => todoSortAt(a).compareTo(todoSortAt(b)));
     var insertIndex = targetItems.length;
     if (before != null) {
       final index = targetItems.indexWhere((todo) => todo.id == before.id);
@@ -298,6 +418,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       ..insert(
         insertIndex,
         dragged.copyWith(
+          dueAt: targetDay,
           completedAt: completed
               ? (dragged.completedAt ?? DateTime.now())
               : null,
@@ -307,7 +428,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     final updates = <int, TodoEntry>{};
     for (var i = 0; i < reordered.length; i++) {
       updates[reordered[i].id] = reordered[i].copyWith(
-        createdAt: targetDay.add(Duration(hours: 12, minutes: i)),
+        sortOrder: targetDay.add(Duration(hours: 12, minutes: i)),
       );
     }
     setState(() {
@@ -362,7 +483,10 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     final index = _todos.indexWhere((todo) => todo.id == editingId);
     setState(() {
       if (index >= 0 && value.isNotEmpty) {
-        _todos[index] = _todos[index].copyWith(title: value);
+        _todos[index] = _todos[index].copyWith(
+          title: value,
+          nextTodoUserModified: _todos[index].generatedFromTodoId != null,
+        );
       }
       _editingTodoId = null;
     });
@@ -376,6 +500,86 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     setState(() => _editingTodoId = null);
     _editFocusNode.unfocus();
     _endInputSession();
+  }
+
+  Future<void> _setTodoRecurrence(
+    TodoEntry todo,
+    TodoRecurrence recurrence,
+  ) async {
+    final index = _todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    setState(() {
+      _todos[index] = _todos[index].copyWith(recurrence: recurrence);
+    });
+    await _savePanelData();
+  }
+
+  void _addSubtask(TodoEntry todo) => setState(() {
+    _addingSubtaskTodoId = todo.id;
+    _pendingSubtaskTitle = '';
+    _expandedSubtaskTodoIds.add(todo.id);
+  });
+
+  Future<void> _createSubtask(TodoEntry todo, String title) async {
+    final value = title.trim();
+    if (mounted) setState(() => _addingSubtaskTodoId = null);
+    if (value.isEmpty) return;
+    final index = _todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0 || todo.completedAt != null) return;
+    setState(
+      () => _todos[index] = todo.copyWith(
+        subtasks: [
+          ...todo.subtasks,
+          TodoSubtask.create().copyWith(title: value),
+        ],
+      ),
+    );
+    await _savePanelData();
+  }
+
+  Future<void> _toggleSubtask(TodoEntry todo, TodoSubtask subtask) async {
+    final index = _todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0 || todo.completedAt != null) return;
+    setState(() {
+      _todos[index] = todo.copyWith(
+        subtasks: todo.subtasks
+            .map(
+              (item) => item.id == subtask.id
+                  ? item.copyWith(isCompleted: !item.isCompleted)
+                  : item,
+            )
+            .toList(),
+      );
+    });
+    await _savePanelData();
+  }
+
+  Future<void> _deleteSubtask(TodoEntry todo, TodoSubtask subtask) async {
+    final index = _todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    setState(
+      () => _todos[index] = todo.copyWith(
+        subtasks: todo.subtasks.where((item) => item.id != subtask.id).toList(),
+      ),
+    );
+    await _savePanelData();
+  }
+
+  Future<void> _makeSubtask(TodoEntry dragged, TodoEntry target) async {
+    if (dragged.id == target.id || target.completedAt != null) return;
+    final draggedIndex = _todos.indexWhere((item) => item.id == dragged.id);
+    final targetIndex = _todos.indexWhere((item) => item.id == target.id);
+    if (draggedIndex < 0 || targetIndex < 0) return;
+    final moved = [TodoSubtask.fromTodo(dragged), ...dragged.subtasks];
+    setState(() {
+      final latestTarget = _todos[targetIndex];
+      _todos[targetIndex] = latestTarget.copyWith(
+        subtasks: [...moved, ...latestTarget.subtasks],
+      );
+      _todos.removeAt(draggedIndex);
+      _expandedSubtaskTodoIds.add(target.id);
+    });
+    await _savePanelData();
   }
 
   Future<void> _showTodoMenu(TodoEntry todo, Offset globalPosition) async {
@@ -392,11 +596,84 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       ),
       items: [
         if (todo.completedAt == null)
+          const PopupMenuItem(
+            value: 'recurrence',
+            height: 36,
+            child: Text('编辑循环'),
+          ),
+        if (todo.completedAt == null)
+          const PopupMenuItem(
+            value: 'dueDate',
+            height: 36,
+            child: Text('编辑截止日期'),
+          ),
+        if (todo.completedAt == null)
+          const PopupMenuItem(
+            value: 'reminder',
+            height: 36,
+            child: Text('编辑提醒'),
+          ),
+        if (todo.completedAt == null)
           const PopupMenuItem(value: 'edit', height: 36, child: Text('编辑')),
         const PopupMenuItem(value: 'delete', height: 36, child: Text('删除')),
       ],
     );
     if (selected == 'edit' && mounted) await _startEditing(todo);
+    if (selected == 'recurrence' && mounted) {
+      final value = await showMenu<TodoRecurrence>(
+        context: context,
+        position: RelativeRect.fromSize(
+          Rect.fromLTWH(position.dx, position.dy, 0, 0),
+          overlay.size,
+        ),
+        items: TodoRecurrence.values
+            .map(
+              (item) => PopupMenuItem(
+                value: item,
+                child: Text(todoRecurrenceLabel(item)),
+              ),
+            )
+            .toList(),
+      );
+      if (value != null) await _setTodoRecurrence(todo, value);
+    }
+    if (selected == 'dueDate' && mounted) {
+      final date = await showDatePicker(
+        context: context,
+        initialDate: todo.dueAt ?? todo.createdAt,
+        firstDate: DateTime(2000),
+        lastDate: DateTime(2100),
+      );
+      final index = _todos.indexWhere((item) => item.id == todo.id);
+      if (date != null && index >= 0) {
+        setState(
+          () => _todos[index] = _todos[index].copyWith(
+            dueAt: _startOfDay(date),
+            nextTodoUserModified: todo.generatedFromTodoId != null,
+          ),
+        );
+        await _savePanelData();
+      }
+    }
+    if (selected == 'reminder' && mounted) {
+      final offset = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromSize(
+          Rect.fromLTWH(position.dx, position.dy, 0, 0),
+          overlay.size,
+        ),
+        items: [
+          PopupMenuItem(
+            value: 'later',
+            child: Text('今天晚些时候（${_laterReminderLabel()}）'),
+          ),
+          PopupMenuItem(value: 'tomorrow', child: Text('明天 9:00')),
+          PopupMenuItem(value: 'nextWeek', child: Text('下周 9:00')),
+          PopupMenuItem(value: 'custom', child: Text('自定义日期和时间')),
+        ],
+      );
+      if (offset != null) await _setReminderPreset(todo: todo, value: offset);
+    }
     if (selected == 'delete' && mounted) await _requestDeleteTodo(todo);
   }
 
@@ -423,7 +700,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('无法更新开机启动设置。')));
+        ).showSnackBar(const SnackBar(content: Text('无法更新开机启动设置')));
       }
     } finally {
       if (mounted) setState(() => _updatingStartup = false);
@@ -539,6 +816,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         Expanded(
           child: switch (_section) {
             _PanelSection.todo => _buildTodoPage(),
+            _PanelSection.allTasks => _buildAllTasksPage(),
             _PanelSection.settings => _buildSettingsPage(),
             _PanelSection.help => _buildHelpPage(),
           },
@@ -566,19 +844,81 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           const SizedBox(height: 28),
           Row(
             children: [
+              _TodoViewButton(
+                label: '今日待办',
+                selected: _todoView == _TodoView.today,
+                onTap: () => setState(() => _todoView = _TodoView.today),
+              ),
+              _TodoViewButton(
+                label: '计划',
+                selected: _todoView == _TodoView.planned,
+                onTap: () => setState(() => _todoView = _TodoView.planned),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
               Expanded(
-                child: TextField(
-                  key: const ValueKey('todo-input'),
-                  controller: _todoController,
-                  focusNode: _todoFocusNode,
-                  style: const TextStyle(fontSize: 14),
-                  decoration: const InputDecoration(
-                    fillColor: Colors.white,
-                    hoverColor: Colors.white,
-                    constraints: BoxConstraints(minHeight: 42, maxHeight: 42),
-                  ),
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => _addTodo(),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        key: const ValueKey('todo-input'),
+                        controller: _todoController,
+                        focusNode: _todoFocusNode,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: InputDecoration(
+                          fillColor: Colors.white,
+                          hoverColor: Colors.white,
+                          constraints: const BoxConstraints(
+                            minHeight: 42,
+                            maxHeight: 42,
+                          ),
+                          suffixIcon: _RecurrenceInputButton(
+                            visible: _todoController.text.isNotEmpty,
+                            value: _newTodoRecurrence,
+                            onChanged: (value) =>
+                                setState(() => _newTodoRecurrence = value),
+                          ),
+                        ),
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => _addTodo(),
+                      ),
+                    ),
+                    IconButton(
+                      key: const ValueKey('todo-due-date-button'),
+                      tooltip: '选择截止日期',
+                      onPressed: _pickNewTodoDueDate,
+                      icon: const Icon(Icons.calendar_today_outlined, size: 17),
+                    ),
+                    PopupMenuButton<String>(
+                      key: const ValueKey('todo-reminder-button'),
+                      tooltip: '提醒',
+                      onSelected: (value) => _setReminderPreset(value: value),
+                      itemBuilder: (_) => [
+                        PopupMenuItem(
+                          value: 'later',
+                          child: Text('今天晚些时候（${_laterReminderLabel()}）'),
+                        ),
+                        PopupMenuItem(
+                          value: 'tomorrow',
+                          child: Text('明天 9:00'),
+                        ),
+                        PopupMenuItem(
+                          value: 'nextWeek',
+                          child: Text('下周 9:00'),
+                        ),
+                        PopupMenuItem(value: 'custom', child: Text('自定义日期和时间')),
+                      ],
+                      icon: Icon(
+                        _newTodoReminderOffsetMinutes == null
+                            ? Icons.notifications_none_outlined
+                            : Icons.notifications_active_outlined,
+                        size: 18,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(width: 8),
@@ -609,14 +949,27 @@ class _ControlPanelPageState extends State<ControlPanelPage>
 
   Widget _buildTodoArchiveList() {
     final today = _startOfDay(DateTime.now());
-    final todayTodos =
-        _todos
-            .where(
-              (todo) =>
-                  todo.completedAt == null && _isSameDay(todo.createdAt, today),
-            )
-            .toList()
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    if (_todoView == _TodoView.planned) {
+      final planned =
+          _todos
+              .where(
+                (todo) =>
+                    todo.completedAt == null &&
+                    _startOfDay(todo.dueAt ?? todo.createdAt).isAfter(today),
+              )
+              .toList()
+            ..sort(
+              (a, b) =>
+                  (a.dueAt ?? a.createdAt).compareTo(b.dueAt ?? b.createdAt),
+            );
+      return ListView(
+        controller: _todoScrollController,
+        padding: const EdgeInsets.only(right: 16),
+        children: _buildPlannedTodoWidgets(planned),
+      );
+    }
+    final todayTodos = visibleTodayTodos(_todos, today).toList()
+      ..sort((a, b) => todoSortAt(a).compareTo(todoSortAt(b)));
     final children = <Widget>[_buildTodoSectionHeader('今日待办')];
     children.add(
       _buildTodoDateDropHeader(
@@ -636,52 +989,55 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       );
     }
 
-    children
-      ..add(const SizedBox(height: 24))
-      ..add(_buildTodoSectionHeader('未完成'));
-    final incompleteGroups = _groupTodosByCreatedDay(
-      _todos.where(
-        (todo) =>
-            todo.completedAt == null && !_isSameDay(todo.createdAt, today),
-      ),
-    );
-    _addArchiveGroups(
-      children,
-      incompleteGroups,
-      completed: false,
-      expandedDays: _expandedIncompleteArchiveDays,
-    );
-    if (incompleteGroups.isEmpty) {
-      children.add(const _TodoEmptyState('没有未完成的历史待办'));
-    }
-
-    final completedGroups = _groupTodosByCreatedDay(
-      _todos.where((todo) => todo.completedAt != null),
-    );
-    children
-      ..add(const SizedBox(height: 24))
-      ..add(_buildTodoSectionHeader('已完成'));
-    _addArchiveGroups(
-      children,
-      completedGroups,
-      completed: true,
-      expandedDays: _expandedArchiveDays,
-    );
-    if (completedGroups.isEmpty) {
-      children.add(
-        DragTarget<TodoEntry>(
-          onAcceptWithDetails: (details) =>
-              _dropTodo(details.data, today, true),
-          builder: (context, candidates, rejected) => SizedBox(
-            height: 16,
-            width: double.infinity,
-            child: candidates.isEmpty
-                ? null
-                : const ColoredBox(color: Color(0x220067c0)),
-          ),
+    if (_shouldShowLegacyTodoArchives) {
+      children
+        ..add(const SizedBox(height: 24))
+        ..add(_buildTodoSectionHeader('未完成'));
+      final incompleteGroups = _groupTodosByCreatedDay(
+        _todos.where(
+          (todo) =>
+              todo.completedAt == null &&
+              (todo.dueAt ?? todo.createdAt).isBefore(today),
         ),
       );
-      children.add(const _TodoEmptyState('完成的 Todo 会自动归档到这里'));
+      _addArchiveGroups(
+        children,
+        incompleteGroups,
+        completed: false,
+        expandedDays: _expandedIncompleteArchiveDays,
+      );
+      if (incompleteGroups.isEmpty) {
+        children.add(const _TodoEmptyState('没有未完成的历史待办'));
+      }
+
+      final completedGroups = _groupTodosByCompletedDay(
+        _todos.where((todo) => todo.completedAt != null),
+      );
+      children
+        ..add(const SizedBox(height: 24))
+        ..add(_buildTodoSectionHeader('已完成'));
+      _addArchiveGroups(
+        children,
+        completedGroups,
+        completed: true,
+        expandedDays: _expandedArchiveDays,
+      );
+      if (completedGroups.isEmpty) {
+        children.add(
+          DragTarget<TodoEntry>(
+            onAcceptWithDetails: (details) =>
+                _dropTodo(details.data, today, true),
+            builder: (context, candidates, rejected) => SizedBox(
+              height: 16,
+              width: double.infinity,
+              child: candidates.isEmpty
+                  ? null
+                  : const ColoredBox(color: Color(0x220067c0)),
+            ),
+          ),
+        );
+        children.add(const _TodoEmptyState('完成的 Todo 会自动归档到这里'));
+      }
     }
     return Scrollbar(
       controller: _todoScrollController,
@@ -691,6 +1047,90 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         controller: _todoScrollController,
         padding: const EdgeInsets.only(right: 16),
         children: children,
+      ),
+    );
+  }
+
+  List<Widget> _buildPlannedTodoWidgets(List<TodoEntry> planned) {
+    final children = <Widget>[_buildTodoSectionHeader('计划')];
+    final groups = <DateTime, List<TodoEntry>>{};
+    for (final todo in planned) {
+      final day = _startOfDay(todo.dueAt ?? todo.createdAt);
+      (groups[day] ??= <TodoEntry>[]).add(todo);
+    }
+    final days = groups.keys.toList()..sort();
+    for (final day in days) {
+      final todos = groups[day]!
+        ..sort((a, b) => todoSortAt(a).compareTo(todoSortAt(b)));
+      final expanded = _expandedPlannedDays.contains(day);
+      children.add(
+        _buildArchiveDayHeader(
+          day,
+          todos.length,
+          completed: false,
+          expanded: expanded,
+          onExpandedChanged: (value) => setState(() {
+            value
+                ? _expandedPlannedDays.add(day)
+                : _expandedPlannedDays.remove(day);
+          }),
+        ),
+      );
+      if (expanded) {
+        children.addAll(
+          todos.map((todo) => _buildTodoRow(todo, compact: true)),
+        );
+      }
+    }
+    if (planned.isEmpty) children.add(const _TodoEmptyState('暂无未来计划'));
+    return children;
+  }
+
+  bool get _shouldShowLegacyTodoArchives => false;
+
+  Widget _buildAllTasksPage() {
+    final today = _startOfDay(DateTime.now());
+    final overdue = _todos
+        .where(
+          (todo) =>
+              todo.completedAt == null &&
+              (todo.dueAt ?? todo.createdAt).isBefore(today),
+        )
+        .toList();
+    final completed = _groupTodosByCompletedDay(
+      _todos.where((todo) => todo.completedAt != null),
+    );
+    final completedWidgets = <Widget>[];
+    _addArchiveGroups(
+      completedWidgets,
+      completed,
+      completed: true,
+      expandedDays: _expandedArchiveDays,
+    );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(40, 36, 32, 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _PageHeader(title: '所有任务', subtitle: ''),
+          const SizedBox(height: 28),
+          Expanded(
+            child: ListView(
+              controller: _todoScrollController,
+              padding: const EdgeInsets.only(right: 16),
+              children: [
+                _buildTodoSectionHeader('未完成'),
+                if (overdue.isEmpty)
+                  const _TodoEmptyState('没有逾期未完成任务')
+                else
+                  ...overdue.map((todo) => _buildTodoRow(todo, compact: true)),
+                const SizedBox(height: 24),
+                _buildTodoSectionHeader('已完成'),
+                ...completedWidgets,
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -706,6 +1146,17 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     return groups;
   }
 
+  Map<DateTime, List<TodoEntry>> _groupTodosByCompletedDay(
+    Iterable<TodoEntry> todos,
+  ) {
+    final groups = <DateTime, List<TodoEntry>>{};
+    for (final todo in todos) {
+      final day = _startOfDay(todo.completedAt ?? todo.createdAt);
+      (groups[day] ??= <TodoEntry>[]).add(todo);
+    }
+    return groups;
+  }
+
   void _addArchiveGroups(
     List<Widget> children,
     Map<DateTime, List<TodoEntry>> groups, {
@@ -715,7 +1166,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     final days = groups.keys.toList()..sort((a, b) => b.compareTo(a));
     for (final day in days) {
       final todos = groups[day]!
-        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        ..sort((a, b) => todoSortAt(a).compareTo(todoSortAt(b)));
       final expanded = expandedDays.contains(day);
       children.add(
         _buildArchiveDayHeader(
@@ -741,14 +1192,8 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   // ignore: unused_element
   Widget _buildTodoList() {
     final now = DateTime.now();
-    final todayTodos =
-        _todos
-            .where(
-              (todo) =>
-                  todo.completedAt == null && _isSameDay(todo.createdAt, now),
-            )
-            .toList()
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final todayTodos = visibleTodayTodos(_todos, now).toList()
+      ..sort((a, b) => todoSortAt(a).compareTo(todoSortAt(b)));
     final completedTodos =
         _todos.where((todo) => todo.completedAt != null).toList()
           ..sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
@@ -888,7 +1333,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         onWillAcceptWithDetails: (details) => details.data.id != todo.id,
         onAcceptWithDetails: (details) => _dropTodo(
           details.data,
-          _startOfDay(todo.createdAt),
+          _startOfDay(todo.dueAt ?? todo.createdAt),
           completed,
           before: todo,
         ),
@@ -912,13 +1357,9 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           child: _buildTodoRowBody(todo, completed: completed),
         ),
         child: DragTarget<TodoEntry>(
-          onWillAcceptWithDetails: (details) => details.data.id != todo.id,
-          onAcceptWithDetails: (details) => _dropTodo(
-            details.data,
-            _startOfDay(todo.createdAt),
-            completed,
-            before: todo,
-          ),
+          onWillAcceptWithDetails: (details) =>
+              details.data.id != todo.id && !completed,
+          onAcceptWithDetails: (details) => _makeSubtask(details.data, todo),
           builder: (context, candidates, rejected) =>
               _buildTodoRowBody(todo, completed: completed),
         ),
@@ -927,7 +1368,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         onWillAcceptWithDetails: (details) => details.data.id != todo.id,
         onAcceptWithDetails: (details) => _dropTodo(
           details.data,
-          _startOfDay(todo.createdAt),
+          _startOfDay(todo.dueAt ?? todo.createdAt),
           completed,
           after: todo,
         ),
@@ -942,107 +1383,267 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     ],
   );
 
-  Widget _buildTodoRowBody(TodoEntry todo, {required bool completed}) =>
-      MouseRegion(
-        key: ValueKey('todo-row-${todo.id}'),
-        cursor: SystemMouseCursors.basic,
-        onEnter: (_) => setState(() => _hoveredTodoId = todo.id),
-        onExit: (_) {
-          if (_hoveredTodoId == todo.id) setState(() => _hoveredTodoId = null);
-        },
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onSecondaryTapDown: (details) =>
-              _showTodoMenu(todo, details.globalPosition),
-          child: AnimatedContainer(
-            key: ValueKey('todo-row-background-${todo.id}'),
-            duration: const Duration(milliseconds: 100),
-            color: _hoveredTodoId == todo.id
-                ? const Color(0xfff3f4f6)
-                : Colors.white,
-            constraints: const BoxConstraints(minHeight: 44),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Checkbox(
-                  key: ValueKey('todo-checkbox-${todo.id}'),
-                  value: completed,
-                  onChanged: (_) =>
-                      completed ? _restoreTodo(todo) : _completeTodo(todo),
+  Widget _buildTodoRowBody(
+    TodoEntry todo, {
+    required bool completed,
+  }) => MouseRegion(
+    key: ValueKey('todo-row-${todo.id}'),
+    cursor: SystemMouseCursors.basic,
+    onEnter: (_) => setState(() => _hoveredTodoId = todo.id),
+    onExit: (_) {
+      if (_hoveredTodoId == todo.id) setState(() => _hoveredTodoId = null);
+    },
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapDown: (details) =>
+          _showTodoMenu(todo, details.globalPosition),
+      child: AnimatedContainer(
+        key: ValueKey('todo-row-background-${todo.id}'),
+        duration: const Duration(milliseconds: 100),
+        color: _hoveredTodoId == todo.id
+            ? const Color(0xfff3f4f6)
+            : Colors.white,
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            if (todo.subtasks.isNotEmpty)
+              SizedBox.square(
+                dimension: 26,
+                child: IconButton(
+                  key: ValueKey('toggle-subtasks-${todo.id}'),
+                  tooltip: _expandedSubtaskTodoIds.contains(todo.id)
+                      ? '收起子项'
+                      : '展开子项',
+                  padding: EdgeInsets.zero,
+                  style: IconButton.styleFrom(
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(1)),
+                    ),
+                  ),
+                  onPressed: () => setState(() {
+                    if (!_expandedSubtaskTodoIds.add(todo.id)) {
+                      _expandedSubtaskTodoIds.remove(todo.id);
+                    }
+                  }),
+                  icon: Icon(
+                    _expandedSubtaskTodoIds.contains(todo.id)
+                        ? Icons.keyboard_arrow_down
+                        : Icons.keyboard_arrow_right,
+                    size: 18,
+                  ),
                 ),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (!completed && _editingTodoId == todo.id)
-                          TextField(
-                            key: ValueKey('edit-todo-input-${todo.id}'),
-                            controller: _editController,
-                            focusNode: _editFocusNode,
-                            style: const TextStyle(fontSize: 14),
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              contentPadding: EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                            ),
-                            textInputAction: TextInputAction.done,
-                            minLines: 1,
-                            maxLines: null,
-                            onSubmitted: (_) => _finishEditing(),
-                          )
-                        else
-                          GestureDetector(
-                            key: ValueKey('todo-title-${todo.id}'),
-                            behavior: HitTestBehavior.opaque,
-                            onTap: completed ? null : () => _startEditing(todo),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                todo.title,
-                                softWrap: true,
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: completed
-                                      ? const Color(0xff666666)
-                                      : const Color(0xff1a1a1a),
-                                  decoration: completed
-                                      ? TextDecoration.lineThrough
-                                      : TextDecoration.none,
-                                ),
-                              ),
+              )
+            else
+              const SizedBox(width: 26),
+            Checkbox(
+              key: ValueKey('todo-checkbox-${todo.id}'),
+              value: completed,
+              onChanged: (_) =>
+                  completed ? _restoreTodo(todo) : _completeTodo(todo),
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (!completed && _editingTodoId == todo.id)
+                      TextField(
+                        key: ValueKey('edit-todo-input-${todo.id}'),
+                        controller: _editController,
+                        focusNode: _editFocusNode,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                        ),
+                        textInputAction: TextInputAction.done,
+                        minLines: 1,
+                        maxLines: null,
+                        onSubmitted: (_) => _finishEditing(),
+                      )
+                    else
+                      GestureDetector(
+                        key: ValueKey('todo-title-${todo.id}'),
+                        behavior: HitTestBehavior.opaque,
+                        onTap: completed ? null : () => _startEditing(todo),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            todo.title,
+                            softWrap: true,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: completed
+                                  ? const Color(0xff666666)
+                                  : const Color(0xff1a1a1a),
+                              decoration: completed
+                                  ? TextDecoration.lineThrough
+                                  : TextDecoration.none,
                             ),
                           ),
-                      ],
+                        ),
+                      ),
+                    if (todo.subtasks.isNotEmpty ||
+                        todo.recurrence != TodoRecurrence.none ||
+                        todo.dueAt != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (todo.subtasks.isNotEmpty)
+                              Text(
+                                '${todo.subtasks.where((item) => item.isCompleted).length}/${todo.subtasks.length}',
+                                style: const TextStyle(
+                                  fontFamily: 'Microsoft YaHei',
+                                  fontSize: 11,
+                                  color: Color(0xff6b7280),
+                                ),
+                              ),
+                            if (todo.subtasks.isNotEmpty &&
+                                todo.recurrence != TodoRecurrence.none)
+                              const SizedBox(width: 8),
+                            if (todo.recurrence != TodoRecurrence.none) ...[
+                              Text(
+                                todoRecurrenceLabel(todo.recurrence),
+                                style: const TextStyle(
+                                  fontFamily: 'Microsoft YaHei',
+                                  fontSize: 11,
+                                  color: Color(0xff6b7280),
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              _RecurrenceInputButton(
+                                visible: true,
+                                value: todo.recurrence,
+                                onChanged: (value) =>
+                                    _setTodoRecurrence(todo, value),
+                              ),
+                            ],
+                            if (todo.dueAt != null &&
+                                !_isSameDay(todo.dueAt!, DateTime.now()))
+                              Padding(
+                                padding: const EdgeInsets.only(left: 8),
+                                child: Text(
+                                  '截止 ${_formatTodoDate(todo.dueAt!)}',
+                                  style: const TextStyle(
+                                    fontFamily: 'Microsoft YaHei',
+                                    fontSize: 11,
+                                    color: Color(0xff6b7280),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    if (todo.subtasks.isNotEmpty &&
+                        _expandedSubtaskTodoIds.contains(todo.id))
+                      _buildControlPanelSubtasks(todo, completed),
+                    if (!completed && _addingSubtaskTodoId == todo.id)
+                      _buildControlPanelSubtaskEditor(todo),
+                  ],
+                ),
+              ),
+            ),
+            if (!completed)
+              SizedBox.square(
+                dimension: 30,
+                child: IconButton(
+                  key: ValueKey('add-subtask-${todo.id}'),
+                  tooltip: '添加子项',
+                  padding: EdgeInsets.zero,
+                  style: IconButton.styleFrom(
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(1)),
                     ),
                   ),
+                  onPressed: () => _addSubtask(todo),
+                  icon: const Icon(Icons.add, size: 17),
                 ),
-                SizedBox.square(
-                  dimension: 30,
-                  child: IconButton(
-                    key: ValueKey('delete-todo-${todo.id}'),
-                    tooltip: '删除 Todo',
-                    padding: EdgeInsets.zero,
-                    style: IconButton.styleFrom(
-                      shape: const RoundedRectangleBorder(
-                        borderRadius: BorderRadius.all(Radius.circular(2)),
+              ),
+            const SizedBox(width: 4),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _buildControlPanelSubtasks(TodoEntry todo, bool parentCompleted) =>
+      Padding(
+        padding: const EdgeInsets.only(top: 5, left: 2),
+        child: Column(
+          children: todo.subtasks
+              .map(
+                (subtask) => Row(
+                  children: [
+                    Checkbox(
+                      value: subtask.isCompleted,
+                      onChanged: parentCompleted
+                          ? null
+                          : (_) => _toggleSubtask(todo, subtask),
+                    ),
+                    Expanded(
+                      child: Text(
+                        subtask.title,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: parentCompleted
+                              ? const Color(0xff666666)
+                              : const Color(0xff1a1a1a),
+                          decoration: parentCompleted
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
                       ),
                     ),
-                    onPressed: () => _requestDeleteTodo(todo),
-                    icon: const Icon(Icons.remove, size: 16),
-                  ),
+                    if (!parentCompleted)
+                      SizedBox.square(
+                        dimension: 26,
+                        child: IconButton(
+                          tooltip: '删除子项',
+                          padding: EdgeInsets.zero,
+                          onPressed: () => _deleteSubtask(todo, subtask),
+                          icon: const Icon(Icons.remove, size: 14),
+                        ),
+                      ),
+                  ],
                 ),
-                const SizedBox(width: 4),
-              ],
+              )
+              .toList(),
+        ),
+      );
+
+  Widget _buildControlPanelSubtaskEditor(TodoEntry todo) => Padding(
+    padding: const EdgeInsets.only(top: 5, left: 2),
+    child: Row(
+      children: [
+        const SizedBox(width: 40),
+        Expanded(
+          child: TextField(
+            key: ValueKey('new-subtask-input-${todo.id}'),
+            autofocus: true,
+            onChanged: (value) => _pendingSubtaskTitle = value,
+            onSubmitted: (value) => _createSubtask(todo, value),
+            onTapOutside: (_) => _createSubtask(todo, _pendingSubtaskTitle),
+            textInputAction: TextInputAction.done,
+            style: const TextStyle(fontSize: 13),
+            decoration: const InputDecoration(
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             ),
           ),
         ),
-      );
+        const SizedBox(width: 26),
+      ],
+    ),
+  );
 
   Widget _todoDragFeedback(TodoEntry todo, bool completed) => Container(
     width: 420,
@@ -1152,7 +1753,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('无法打开 GitHub 仓库。')));
+      ).showSnackBar(const SnackBar(content: Text('无法打开 GitHub 仓库')));
     }
   }
 
@@ -1173,7 +1774,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                 title: '桌宠操作',
                 items: [
                   '按住桌宠并拖动，可以移动桌宠窗口。',
-                  '按住 Ctrl 后在桌宠上长按鼠标左键并上下拖动，可以在 50% 至 200% 之间等比缩放。',
+                  '按住 Ctrl 后在桌宠上长按鼠标左键并上下拖动，可以在 50% 到 200% 之间等比缩放。',
                   '右键桌宠可打开菜单，使用控制面板、鼠标穿透、置顶、恢复 100% 大小和退出功能。',
                 ],
               ),
@@ -1219,6 +1820,40 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   );
 }
 
+class _TodoViewButton extends StatelessWidget {
+  const _TodoViewButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(right: 6),
+    child: TextButton(
+      onPressed: onTap,
+      style: TextButton.styleFrom(
+        foregroundColor: selected
+            ? const Color(0xff0078d4)
+            : const Color(0xff4b5563),
+        backgroundColor: selected
+            ? const Color(0xffeff6ff)
+            : Colors.transparent,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(4)),
+        ),
+      ),
+      child: RichText(
+        text: TextSpan(text: label, style: DefaultTextStyle.of(context).style),
+      ),
+    ),
+  );
+}
+
 class _NavigationPane extends StatelessWidget {
   const _NavigationPane({required this.selected, required this.onSelected});
 
@@ -1253,6 +1888,17 @@ class _NavigationPane extends StatelessWidget {
               label: 'Todo',
               selected: selected == _PanelSection.todo,
               onTap: () => onSelected(_PanelSection.todo),
+            ),
+            const SizedBox(height: 4),
+            _NavigationItem(
+              key: const ValueKey('all-tasks-tab'),
+              icon: Icons.list_alt_outlined,
+              /*
+              label: '所有任�?',
+              */
+              label: '所有任务',
+              selected: selected == _PanelSection.allTasks,
+              onTap: () => onSelected(_PanelSection.allTasks),
             ),
             const SizedBox(height: 4),
             _NavigationItem(
@@ -1617,39 +2263,256 @@ class _SettingRow extends StatelessWidget {
   );
 }
 
+enum TodoRecurrence { none, daily, weekly, monthly }
+
+TodoEntry? nextRecurringTodo(
+  TodoEntry todo,
+  Iterable<TodoEntry> todos, [
+  DateTime? completedAt,
+]) {
+  if (todo.recurrence == TodoRecurrence.none) {
+    return null;
+  }
+  final nextId =
+      todos.fold<int>(0, (maxId, item) => item.id > maxId ? item.id : maxId) +
+      1;
+  final date = _startOfDay(completedAt ?? todo.completedAt ?? DateTime.now());
+  final nextDate = switch (todo.recurrence) {
+    TodoRecurrence.daily => date.add(const Duration(days: 1)),
+    TodoRecurrence.weekly => date.add(Duration(days: 7 - date.weekday + 1)),
+    TodoRecurrence.monthly => DateTime(date.year, date.month + 1, 1),
+    TodoRecurrence.none => date,
+  };
+  final seriesId = todo.recurrenceSeriesId ?? todo.id.toString();
+  final alreadyGenerated = todos.any(
+    (item) =>
+        item.id != todo.id &&
+        item.recurrenceSeriesId == seriesId &&
+        item.completedAt == null &&
+        item.dueAt != null &&
+        _isSameDay(item.dueAt!, nextDate),
+  );
+  if (alreadyGenerated) return null;
+  return TodoEntry(
+    id: nextId,
+    title: todo.title,
+    createdAt: nextDate,
+    recurrence: todo.recurrence,
+    dueAt: nextDate,
+    recurrenceSeriesId: seriesId,
+    generatedFromTodoId: todo.id,
+    generatedByCompletion: true,
+    subtasks: todo.subtasks
+        .map((subtask) => subtask.copyWith(isCompleted: false))
+        .toList(),
+  );
+}
+
+const _longOverdueRecurrenceThreshold = Duration(days: 365);
+
+DateTime? nextRecurringEligibleAt(TodoEntry todo, DateTime completedAt) {
+  if (todo.recurrence == TodoRecurrence.none) {
+    return null;
+  }
+  final today = _startOfDay(completedAt);
+  final dueAt = _startOfDay(todo.dueAt ?? todo.createdAt);
+  if (dueAt.isBefore(today.subtract(_longOverdueRecurrenceThreshold))) {
+    return null;
+  }
+  return switch (todo.recurrence) {
+    TodoRecurrence.daily => today.add(const Duration(days: 1)),
+    TodoRecurrence.weekly => today.add(Duration(days: 7 - today.weekday + 1)),
+    TodoRecurrence.monthly => DateTime(today.year, today.month + 1, 1),
+    TodoRecurrence.none => null,
+  };
+}
+
+List<TodoEntry> materializeDueRecurringTodos(
+  Iterable<TodoEntry> source,
+  DateTime now,
+) {
+  final today = _startOfDay(now);
+  final todos = List<TodoEntry>.of(source);
+  var nextId =
+      todos.fold<int>(
+        0,
+        (maximum, todo) => maximum > todo.id ? maximum : todo.id,
+      ) +
+      1;
+  final seriesIdsWithOpenTodo = todos
+      .where(
+        (todo) => todo.completedAt == null && todo.recurrenceSeriesId != null,
+      )
+      .map((todo) => todo.recurrenceSeriesId!)
+      .toSet();
+  final latestBySeries = <String, TodoEntry>{};
+  for (final todo in todos) {
+    final seriesId = todo.recurrenceSeriesId;
+    if (seriesId == null ||
+        todo.completedAt == null ||
+        todo.recurrenceNextEligibleAt == null) {
+      continue;
+    }
+    final existing = latestBySeries[seriesId];
+    if (existing == null || todo.completedAt!.isAfter(existing.completedAt!)) {
+      latestBySeries[seriesId] = todo;
+    }
+  }
+  for (final entry in latestBySeries.entries) {
+    final template = entry.value;
+    if (seriesIdsWithOpenTodo.contains(entry.key) ||
+        template.recurrenceNextEligibleAt!.isAfter(today)) {
+      continue;
+    }
+    todos.add(
+      TodoEntry(
+        id: nextId++,
+        title: template.title,
+        createdAt: today,
+        dueAt: today,
+        recurrence: template.recurrence,
+        recurrenceSeriesId: entry.key,
+        subtasks: template.subtasks
+            .map((subtask) => subtask.copyWith(isCompleted: false))
+            .toList(),
+      ),
+    );
+  }
+  return todos;
+}
+
+String todoRecurrenceLabel(TodoRecurrence value) => switch (value) {
+  /*
+  TodoRecurrence.none => '不循�?',
+  */
+  TodoRecurrence.none => '不循环',
+  TodoRecurrence.daily => '每天',
+  TodoRecurrence.weekly => '每周',
+  TodoRecurrence.monthly => '每月',
+};
+
 class TodoEntry {
   const TodoEntry({
     required this.id,
     required this.title,
     required this.createdAt,
+    this.sortOrder,
     this.completedAt,
+    this.recurrence = TodoRecurrence.none,
+    this.subtasks = const [],
+    this.dueAt,
+    this.recurrenceSeriesId,
+    this.recurrenceNextEligibleAt,
+    this.generatedFromTodoId,
+    this.generatedNextTodoId,
+    this.generatedByCompletion = false,
+    this.nextTodoUserModified = false,
+    this.reminderEnabled = false,
+    this.reminderOffsetMinutes,
+    this.remindedAt,
+    this.reminderAt,
   });
 
   final int id;
   final String title;
   final DateTime createdAt;
+  final DateTime? sortOrder;
   final DateTime? completedAt;
+  final TodoRecurrence recurrence;
+  final List<TodoSubtask> subtasks;
+  final DateTime? dueAt;
+  final String? recurrenceSeriesId;
+  final DateTime? recurrenceNextEligibleAt;
+  final int? generatedFromTodoId;
+  final int? generatedNextTodoId;
+  final bool generatedByCompletion;
+  final bool nextTodoUserModified;
+  final bool reminderEnabled;
+  final int? reminderOffsetMinutes;
+  final DateTime? remindedAt;
+  final DateTime? reminderAt;
 
   TodoEntry copyWith({
     String? title,
     DateTime? createdAt,
+    DateTime? sortOrder,
     DateTime? completedAt,
     bool clearCompletedAt = false,
+    TodoRecurrence? recurrence,
+    List<TodoSubtask>? subtasks,
+    DateTime? dueAt,
+    String? recurrenceSeriesId,
+    DateTime? recurrenceNextEligibleAt,
+    int? generatedFromTodoId,
+    int? generatedNextTodoId,
+    bool? generatedByCompletion,
+    bool? nextTodoUserModified,
+    bool clearGeneratedNextTodoId = false,
+    bool? reminderEnabled,
+    int? reminderOffsetMinutes,
+    DateTime? remindedAt,
+    bool clearRemindedAt = false,
+    DateTime? reminderAt,
   }) => TodoEntry(
     id: id,
     title: title ?? this.title,
     createdAt: createdAt ?? this.createdAt,
+    sortOrder: sortOrder ?? this.sortOrder,
     completedAt: clearCompletedAt ? null : completedAt ?? this.completedAt,
+    recurrence: recurrence ?? this.recurrence,
+    subtasks: subtasks ?? this.subtasks,
+    dueAt: dueAt ?? this.dueAt,
+    recurrenceSeriesId: recurrenceSeriesId ?? this.recurrenceSeriesId,
+    recurrenceNextEligibleAt:
+        recurrenceNextEligibleAt ?? this.recurrenceNextEligibleAt,
+    generatedFromTodoId: generatedFromTodoId ?? this.generatedFromTodoId,
+    generatedNextTodoId: clearGeneratedNextTodoId
+        ? null
+        : generatedNextTodoId ?? this.generatedNextTodoId,
+    generatedByCompletion: generatedByCompletion ?? this.generatedByCompletion,
+    nextTodoUserModified: nextTodoUserModified ?? this.nextTodoUserModified,
+    reminderEnabled: reminderEnabled ?? this.reminderEnabled,
+    reminderOffsetMinutes: reminderOffsetMinutes ?? this.reminderOffsetMinutes,
+    remindedAt: clearRemindedAt ? null : remindedAt ?? this.remindedAt,
+    reminderAt: reminderAt ?? this.reminderAt,
   );
 
   factory TodoEntry.fromJson(Map<String, dynamic> json) {
     final createdAt = DateTime.tryParse(json['createdAt'] as String? ?? '');
+    final sortOrder = DateTime.tryParse(json['sortOrder'] as String? ?? '');
+    final dueAt = DateTime.tryParse(json['dueAt'] as String? ?? '');
     final completedAt = DateTime.tryParse(json['completedAt'] as String? ?? '');
+    final recurrenceNextEligibleAt = DateTime.tryParse(
+      json['recurrenceNextEligibleAt'] as String? ?? '',
+    );
+    final remindedAt = DateTime.tryParse(json['remindedAt'] as String? ?? '');
+    final reminderAt = DateTime.tryParse(json['reminderAt'] as String? ?? '');
+    final recurrence = TodoRecurrence.values.firstWhere(
+      (value) => value.name == json['recurrence'],
+      orElse: () => TodoRecurrence.none,
+    );
     return TodoEntry(
       id: json['id'] as int,
       title: json['title'] as String,
       createdAt: createdAt ?? DateTime.now(),
+      sortOrder: sortOrder,
+      dueAt: dueAt ?? createdAt ?? DateTime.now(),
       completedAt: completedAt,
+      recurrence: recurrence,
+      subtasks: (json['subtasks'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((item) => TodoSubtask.fromJson(Map<String, dynamic>.from(item)))
+          .toList(),
+      recurrenceSeriesId: json['recurrenceSeriesId'] as String?,
+      recurrenceNextEligibleAt: recurrenceNextEligibleAt,
+      generatedFromTodoId: json['generatedFromTodoId'] as int?,
+      generatedNextTodoId: json['generatedNextTodoId'] as int?,
+      generatedByCompletion: json['generatedByCompletion'] as bool? ?? false,
+      nextTodoUserModified: json['nextTodoUserModified'] as bool? ?? false,
+      reminderEnabled: json['reminderEnabled'] as bool? ?? false,
+      reminderOffsetMinutes: json['reminderOffsetMinutes'] as int?,
+      remindedAt: remindedAt,
+      reminderAt: reminderAt,
     );
   }
 
@@ -1657,16 +2520,77 @@ class TodoEntry {
     'id': id,
     'title': title,
     'createdAt': createdAt.toIso8601String(),
+    'sortOrder': sortOrder?.toIso8601String(),
     'completedAt': completedAt?.toIso8601String(),
+    'recurrence': recurrence.name,
+    'recurrenceNextEligibleAt': recurrenceNextEligibleAt?.toIso8601String(),
+    'subtasks': subtasks.map((subtask) => subtask.toJson()).toList(),
+    'dueAt': dueAt?.toIso8601String(),
+    'recurrenceSeriesId': recurrenceSeriesId,
+    'generatedFromTodoId': generatedFromTodoId,
+    'generatedNextTodoId': generatedNextTodoId,
+    'generatedByCompletion': generatedByCompletion,
+    'nextTodoUserModified': nextTodoUserModified,
+    'reminderEnabled': reminderEnabled,
+    'reminderOffsetMinutes': reminderOffsetMinutes,
+    'remindedAt': remindedAt?.toIso8601String(),
+    'reminderAt': reminderAt?.toIso8601String(),
+  };
+}
+
+class TodoSubtask {
+  const TodoSubtask({
+    required this.id,
+    required this.title,
+    this.isCompleted = false,
+  });
+
+  factory TodoSubtask.create() => TodoSubtask(
+    id: DateTime.now().microsecondsSinceEpoch.toString(),
+    title: '',
+  );
+
+  factory TodoSubtask.fromTodo(TodoEntry todo) => TodoSubtask(
+    id: 'todo-${todo.id}',
+    title: todo.title,
+    isCompleted: todo.completedAt != null,
+  );
+
+  factory TodoSubtask.fromJson(Map<String, dynamic> json) => TodoSubtask(
+    id:
+        json['id'] as String? ??
+        DateTime.now().microsecondsSinceEpoch.toString(),
+    title: json['title'] as String? ?? '',
+    isCompleted: json['isCompleted'] as bool? ?? false,
+  );
+
+  final String id;
+  final String title;
+  final bool isCompleted;
+
+  TodoSubtask copyWith({String? title, bool? isCompleted}) => TodoSubtask(
+    id: id,
+    title: title ?? this.title,
+    isCompleted: isCompleted ?? this.isCompleted,
+  );
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'title': title,
+    'isCompleted': isCompleted,
   };
 }
 
 bool _isSameDay(DateTime a, DateTime b) =>
     a.year == b.year && a.month == b.month && a.day == b.day;
 
+DateTime todoSortAt(TodoEntry todo) => todo.sortOrder ?? todo.createdAt;
+
 bool _todayTodosAreCompleted(Iterable<TodoEntry> todos, [DateTime? now]) {
   final today = now ?? DateTime.now();
-  final todayTodos = todos.where((todo) => _isSameDay(todo.createdAt, today));
+  final todayTodos = todos.where(
+    (todo) => _isSameDay(todo.dueAt ?? todo.createdAt, today),
+  );
   return todayTodos.isNotEmpty &&
       todayTodos.every((todo) => todo.completedAt != null);
 }
@@ -1684,6 +2608,28 @@ Duration _timeUntilNextMidnight(DateTime now) {
 
 DateTime _startOfDay(DateTime value) =>
     DateTime(value.year, value.month, value.day);
+
+List<TodoEntry> visibleTodayTodos(Iterable<TodoEntry> todos, DateTime today) =>
+    todos
+        .where(
+          (todo) =>
+              todo.completedAt == null &&
+              _isSameDay(todo.dueAt ?? todo.createdAt, today),
+        )
+        .toList(growable: false);
+
+DateTime reminderTimeFor(TodoEntry todo) {
+  final dueAt = _startOfDay(todo.dueAt ?? todo.createdAt);
+  return dueAt
+      .add(const Duration(hours: 9))
+      .subtract(Duration(minutes: todo.reminderOffsetMinutes ?? 0));
+}
+
+bool shouldShowReminder(TodoEntry todo, DateTime now) =>
+    todo.completedAt == null &&
+    todo.reminderEnabled &&
+    todo.remindedAt == null &&
+    now.isAfter(todo.reminderAt ?? reminderTimeFor(todo));
 
 String _formatTodoDate(DateTime value) {
   final month = value.month.toString().padLeft(2, '0');
@@ -1748,6 +2694,9 @@ class _DeleteTodoDialog extends StatelessWidget {
             ),
             const SizedBox(height: 24),
             Text(
+              /*
+              '确定要删除�?title”吗�?',
+              */
               '确定要删除“$title”吗？',
               style: const TextStyle(
                 fontFamily: 'Microsoft YaHei',
@@ -1806,6 +2755,136 @@ class _DeleteTodoDialog extends StatelessWidget {
   );
 }
 
+class _RecurrenceInputButton extends StatefulWidget {
+  const _RecurrenceInputButton({
+    required this.visible,
+    required this.value,
+    required this.onChanged,
+    this.bubbleStyle = false,
+  });
+  final bool visible;
+  final TodoRecurrence value;
+  final ValueChanged<TodoRecurrence> onChanged;
+  final bool bubbleStyle;
+
+  @override
+  State<_RecurrenceInputButton> createState() => _RecurrenceInputButtonState();
+}
+
+class _RecurrenceInputButtonState extends State<_RecurrenceInputButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) => widget.visible
+      ? Tooltip(
+          richMessage: const TextSpan(
+            style: TextStyle(
+              color: Color(0xff4a4a4a),
+              fontFamily: 'Microsoft YaHei',
+              fontSize: 12,
+              height: 1.0,
+            ),
+            children: [
+              TextSpan(
+                text: '重复',
+                style: TextStyle(
+                  fontFamily: 'Microsoft YaHei',
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              TextSpan(text: '\n\n设置任务重复周期'),
+            ],
+          ),
+          preferBelow: false,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: widget.bubbleStyle
+                ? Border.all(color: const Color(0xfffde8ed), width: 1)
+                : null,
+            borderRadius: BorderRadius.circular(widget.bubbleStyle ? 6 : 3),
+            boxShadow: widget.bubbleStyle
+                ? null
+                : const [
+                    BoxShadow(
+                      color: Color(0x26000000),
+                      blurRadius: 4,
+                      offset: Offset(0, 1),
+                    ),
+                  ],
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: MouseRegion(
+            onEnter: (_) => setState(() => _hovered = true),
+            onExit: (_) => setState(() => _hovered = false),
+            child: AnimatedContainer(
+              duration: widget.bubbleStyle
+                  ? Duration.zero
+                  : const Duration(milliseconds: 100),
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(
+                color: widget.bubbleStyle && _hovered
+                    ? const Color(0x33ffffff)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: PopupMenuButton<TodoRecurrence>(
+                tooltip: '',
+                splashRadius: 0,
+                enableFeedback: false,
+                style: ButtonStyle(
+                  overlayColor: const WidgetStatePropertyAll(
+                    Colors.transparent,
+                  ),
+                  backgroundColor: const WidgetStatePropertyAll(
+                    Colors.transparent,
+                  ),
+                  shadowColor: const WidgetStatePropertyAll(Colors.transparent),
+                ),
+                onSelected: widget.onChanged,
+                itemBuilder: (_) => TodoRecurrence.values
+                    .where((item) => item != TodoRecurrence.none)
+                    .map(
+                      (item) => PopupMenuItem(
+                        value: item,
+                        height: 34,
+                        child: Text(
+                          todoRecurrenceLabel(item),
+                          style: const TextStyle(
+                            fontFamily: 'Microsoft YaHei',
+                            fontSize: 12,
+                            color: Color(0xff4a4a4a),
+                          ),
+                        ),
+                      ),
+                    )
+                    .toList(),
+                color: widget.bubbleStyle
+                    ? const Color(0xfffffbfc)
+                    : Colors.white,
+                elevation: widget.bubbleStyle ? 0 : 4,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(
+                    widget.bubbleStyle ? 8 : 3,
+                  ),
+                  side: widget.bubbleStyle
+                      ? const BorderSide(color: Color(0xfffde8ed))
+                      : BorderSide.none,
+                ),
+                constraints: const BoxConstraints(minWidth: 120),
+                padding: const EdgeInsets.all(3),
+                child: const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: Icon(Icons.sync, color: Color(0xff9ca3af), size: 15),
+                ),
+              ),
+            ),
+          ),
+        )
+      : const SizedBox(width: 0, height: 0);
+}
+
 class _PanelData {
   const _PanelData({
     required this.todos,
@@ -1848,13 +2927,17 @@ class _PanelDataStore {
       final json =
           jsonDecode(await _file.readAsString()) as Map<String, dynamic>;
       final todosJson = json['todos'] as List<dynamic>? ?? const [];
-      final cutoff = _startOfDay(
-        DateTime.now(),
-      ).subtract(const Duration(days: 6));
-      final todos = todosJson
+      final today = _startOfDay(DateTime.now());
+      final migratedTodos = todosJson
           .map((item) => TodoEntry.fromJson(item as Map<String, dynamic>))
-          .where((todo) => !_startOfDay(todo.createdAt).isBefore(cutoff))
           .toList();
+      final carriedOverTodos = migratedTodos;
+      final scheduledTodos = materializeDueRecurringTodos(
+        carriedOverTodos,
+        today,
+      );
+      final changed = scheduledTodos.length != migratedTodos.length;
+      final todos = scheduledTodos;
       final data = _PanelData(
         todos: todos,
         launchAtStartup: json['launchAtStartup'] as bool? ?? false,
@@ -1867,7 +2950,7 @@ class _PanelDataStore {
         bubbleVisibleByDefault: json['bubbleVisibleByDefault'] as bool? ?? true,
         autoUpdate: json['autoUpdate'] as bool? ?? false,
       );
-      if (todos.length != todosJson.length) await save(data);
+      if (changed || todos.length != todosJson.length) await save(data);
       return data;
     } catch (_) {
       return const _PanelData.defaults();
@@ -1876,12 +2959,7 @@ class _PanelDataStore {
 
   static Future<void> save(_PanelData data) async {
     if (_isFlutterTest) return;
-    final cutoff = _startOfDay(
-      DateTime.now(),
-    ).subtract(const Duration(days: 6));
-    final todos = data.todos
-        .where((todo) => !_startOfDay(todo.createdAt).isBefore(cutoff))
-        .toList(growable: false);
+    final todos = data.todos;
     await _file.parent.create(recursive: true);
     await _file.writeAsString(
       jsonEncode({
