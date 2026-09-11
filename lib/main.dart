@@ -537,6 +537,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   Timer? _caretHealthCheckTimer;
   StreamSubscription<FileSystemEvent>? _todoFileWatcher;
   Timer? _todoRefreshDebounce;
+  Future<void> _bubbleHierarchyQueue = Future<void>.value();
   Timer? _midnightArchiveTimer;
   Timer? _allTodosCompletedDelayTimer;
   Timer? _allTodosCompletedDisplayTimer;
@@ -560,6 +561,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   late double _bubbleHeight;
   bool _bubbleResizing = false;
   double _bubbleResizeStartHeight = _petBubbleMinHeight;
+  Offset? _bubbleResizeStartWindowPosition;
   double? _bubbleResizeStartCursorY;
   bool _bubbleResizeSampleInFlight = false;
   bool _bubbleResizeSamplePending = false;
@@ -933,6 +935,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     if (event.localPosition.dy > _bubbleResizeHitHeight) return;
     _bubbleResizing = true;
     _bubbleResizeStartHeight = _bubbleHeight;
+    _bubbleResizeStartWindowPosition = null;
     _bubbleResizeStartCursorY = null;
   }
 
@@ -950,9 +953,20 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     try {
       final cursor = await screenRetriever.getCursorScreenPoint();
       _bubbleResizeStartCursorY ??= cursor.dy;
-      final height =
-          _bubbleResizeStartHeight + (_bubbleResizeStartCursorY! - cursor.dy);
+      final height = max(
+        _petBubbleMinHeight,
+        _bubbleResizeStartHeight +
+            (_bubbleResizeStartCursorY! - cursor.dy),
+      );
+      final heightDelta = height - _bubbleResizeStartHeight;
       _setLayoutPreview(bubbleHeight: height);
+      if (!_isFlutterTest) {
+        _bubbleResizeStartWindowPosition ??= await windowManager.getPosition();
+        final position = _bubbleResizeStartWindowPosition!;
+        await windowManager.setPosition(
+          Offset(position.dx, position.dy - heightDelta),
+        );
+      }
     } finally {
       _bubbleResizeSampleInFlight = false;
       if (_bubbleResizeSamplePending) {
@@ -964,6 +978,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   void _endBubbleResize() {
     _bubbleResizing = false;
+    _bubbleResizeStartWindowPosition = null;
     _bubbleResizeStartCursorY = null;
   }
 
@@ -1195,42 +1210,48 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     await _saveBubbleTodos(current, todos);
   }
 
-  Future<void> _promoteBubbleSubtask(TodoSubtaskDragData drag, TodoEntry target,
-      bool after) async {
+  Future<void> _promoteBubbleSubtask(
+    TodoSubtaskDragData drag,
+    TodoEntry target,
+    bool after,
+  ) async {
     final current = await _PanelDataStore.load();
     final todos = List<TodoEntry>.of(current.todos);
-    final parentIndex = todos.indexWhere((t) => t.id == drag.parentId);
-    if (parentIndex < 0) return;
-    final parent = todos[parentIndex];
-    final matches = parent.subtasks.where((s) => s.id == drag.subtaskId).toList();
-    final subtask = matches.isEmpty ? null : matches.first;
-    if (subtask == null || subtask.title.trim().isEmpty) return;
-    final item = TodoEntry(
-      id: DateTime.now().microsecondsSinceEpoch,
-      title: subtask.title.trim(),
-      createdAt: parent.createdAt,
-      sortOrder: parent.sortOrder,
-      completedAt: subtask.isCompleted ? DateTime.now() : null,
-      recurrence: parent.recurrence,
-      dueAt: parent.dueAt,
-      recurrenceSeriesId: parent.recurrenceSeriesId,
-      recurrenceNextEligibleAt: parent.recurrenceNextEligibleAt,
-      generatedFromTodoId: parent.generatedFromTodoId,
-      generatedNextTodoId: parent.generatedNextTodoId,
-      generatedByCompletion: parent.generatedByCompletion,
-      nextTodoUserModified: parent.nextTodoUserModified ||
-          parent.generatedFromTodoId != null,
-      reminderEnabled: parent.reminderEnabled,
-      reminderOffsetMinutes: parent.reminderOffsetMinutes,
-      remindedAt: parent.remindedAt,
-      reminderAt: parent.reminderAt,
-    );
-    todos[parentIndex] = parent.copyWith(
-      subtasks: parent.subtasks.where((s) => s.id != drag.subtaskId).toList(),
-      nextTodoUserModified: parent.generatedFromTodoId != null ? true : parent.nextTodoUserModified);
-    final targetIndex = todos.indexWhere((t) => t.id == target.id);
-    todos.insert((targetIndex < 0 ? todos.length : targetIndex + (after ? 1 : 0)), item);
+    if (!promoteTodoSubtask(
+      todos,
+      drag,
+      targetTodoId: target.id,
+      after: after,
+      newTodoId: DateTime.now().microsecondsSinceEpoch,
+      allowSameParent: true,
+    )) {
+      return;
+    }
     await _saveBubbleTodos(current, todos);
+  }
+
+  Future<void> _moveBubbleSubtask(
+    TodoSubtaskDragData drag, {
+    required int targetParentId,
+    String? targetSubtaskId,
+    bool after = false,
+  }) async {
+    final operation = _bubbleHierarchyQueue.then((_) async {
+      final current = await _PanelDataStore.load();
+      final todos = List<TodoEntry>.of(current.todos);
+      if (!moveTodoSubtask(
+        todos,
+        drag,
+        targetParentId: targetParentId,
+        targetSubtaskId: targetSubtaskId,
+        after: after,
+      )) {
+        return;
+      }
+      await _saveBubbleTodos(current, todos);
+    });
+    _bubbleHierarchyQueue = operation.catchError((_) {});
+    await operation;
   }
 
   Future<void> _setBubbleTodoRecurrence(
@@ -1326,6 +1347,12 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       ),
       items: [
         if (todo.completedAt == null)
+          const PopupMenuItem(value: 'recurrence', child: Text('循环')),
+        if (todo.completedAt == null)
+          const PopupMenuItem(value: 'dueDate', child: Text('截止日期')),
+        if (todo.completedAt == null)
+          const PopupMenuItem(value: 'reminder', child: Text('提醒')),
+        if (todo.completedAt == null)
           const PopupMenuItem(
             value: 'edit',
             height: 34,
@@ -1354,7 +1381,113 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     );
     if (!mounted) return;
     if (selected == 'edit') onEdit();
+    if (selected == 'recurrence') {
+      if (!mounted) return;
+      final value = await showMenu<TodoRecurrence>(
+        context: context,
+        position: RelativeRect.fromLTRB(
+          position.dx,
+          position.dy,
+          position.dx,
+          position.dy,
+        ),
+        items: TodoRecurrence.values
+            .map(
+              (item) => PopupMenuItem(
+                value: item,
+                child: Text(todoRecurrenceLabel(item)),
+              ),
+            )
+            .toList(),
+      );
+      if (value != null) await _setBubbleTodoRecurrence(todo, value);
+    }
+    if (selected == 'dueDate') {
+      if (!mounted) return;
+      final value = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromLTRB(
+          position.dx,
+          position.dy,
+          position.dx,
+          position.dy,
+        ),
+        items: const [
+          PopupMenuItem(value: 'today', child: Text('今天')),
+          PopupMenuItem(value: 'tomorrow', child: Text('明天')),
+          PopupMenuItem(value: 'nextWeek', child: Text('下周')),
+          PopupMenuItem(value: 'custom', child: Text('自定义日期')),
+        ],
+      );
+      if (value != null) await _setBubbleTodoDueDate(todo, value);
+    }
+    if (selected == 'reminder') {
+      if (!mounted) return;
+      final value = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromLTRB(
+          position.dx,
+          position.dy,
+          position.dx,
+          position.dy,
+        ),
+        items: const [
+          PopupMenuItem(value: 'later', child: Text('今天晚些时候')),
+          PopupMenuItem(value: 'tomorrow', child: Text('明天 9:00')),
+          PopupMenuItem(value: 'nextWeek', child: Text('下周 9:00')),
+        ],
+      );
+      if (value != null) await _setBubbleTodoReminder(todo, value);
+    }
     if (selected == 'delete') await _deleteBubbleTodo(todo);
+  }
+
+  Future<void> _setBubbleTodoDueDate(TodoEntry todo, String value) async {
+    final now = DateTime.now();
+    DateTime? date = switch (value) {
+      'tomorrow' => now.add(const Duration(days: 1)),
+      'nextWeek' => now.add(const Duration(days: 7)),
+      _ => now,
+    };
+    if (value == 'custom') {
+      if (!mounted) return;
+      date = await showDatePicker(
+        context: context,
+        initialDate: todo.dueAt ?? now,
+        firstDate: DateTime(2000),
+        lastDate: DateTime(2100),
+      );
+    }
+    if (date == null) return;
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final index = todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    todos[index] = todos[index].copyWith(
+      dueAt: _startOfDay(date),
+      nextTodoUserModified: todos[index].generatedFromTodoId != null,
+    );
+    await _saveBubbleTodos(current, todos);
+  }
+
+  Future<void> _setBubbleTodoReminder(TodoEntry todo, String value) async {
+    final now = DateTime.now();
+    final at = switch (value) {
+      'tomorrow' => DateTime(now.year, now.month, now.day + 1, 9),
+      'nextWeek' => DateTime(now.year, now.month, now.day + 7, 9),
+      _ => now.add(const Duration(hours: 3)),
+    };
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final index = todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    todos[index] = todos[index].copyWith(
+      reminderEnabled: true,
+      reminderOffsetMinutes: 0,
+      reminderAt: at,
+      clearRemindedAt: true,
+    );
+    await _saveBubbleTodos(current, todos);
   }
 
   Future<void> _renameBubbleTodo(TodoEntry todo, String title) async {
@@ -1377,7 +1510,12 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     if (!mounted) return;
     _bubbleEditInputActive = active;
     if (active) {
+      _caretIdleTimer?.cancel();
+      _caretIdleTimer = null;
       _localCaretLossTimer?.cancel();
+      _localCaretLossTimer = null;
+      _systemCaretActive = false;
+      _caretIdleSuppressed = true;
       _bubbleInputCaretLost = false;
       if (!_windowDragging && _animation != _PetAnimation.busy) {
         _playAnimation(_PetAnimation.busy);
@@ -1386,6 +1524,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       _localCaretLossTimer?.cancel();
       _bubbleInputCaretLost = false;
       _playAnimation(_PetAnimation.busyEnd);
+      unawaited(_requestCaretStateRefresh());
     }
   }
 
@@ -1432,7 +1571,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   Future<void> _requestCaretStateRefresh() async {
-    if (!mounted || _requestingCaretRefresh) return;
+    if (!mounted || _requestingCaretRefresh || _bubbleEditInputActive) return;
     _requestingCaretRefresh = true;
     try {
       await _systemChannel.invokeMethod<void>('requestCaretStateRefresh');
@@ -1493,6 +1632,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   void _handleCaretState(bool active) {
     if (!mounted) return;
+    if (_bubbleEditInputActive) return;
     if (!active) {
       _caretIdleTimer?.cancel();
       _caretIdleTimer = null;
@@ -1936,6 +2076,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
                             onTodoRecurrenceChanged: _setBubbleTodoRecurrence,
                             onReorder: _reorderBubbleTodo,
                             onPromoteSubtask: _promoteBubbleSubtask,
+                            onMoveSubtask: _moveBubbleSubtask,
                             onMenu: _showBubbleTodoMenu,
                             onEdit: _renameBubbleTodo,
                             onEditFocusChanged: _handleBubbleEditFocus,
@@ -2206,6 +2347,7 @@ class _TodoSpeechBubble extends StatefulWidget {
     required this.onRecurrenceChanged,
     required this.onReorder,
     required this.onPromoteSubtask,
+    required this.onMoveSubtask,
     required this.onMenu,
     required this.onEdit,
     required this.onEditFocusChanged,
@@ -2236,7 +2378,15 @@ class _TodoSpeechBubble extends StatefulWidget {
   final Future<void> Function(TodoEntry, TodoRecurrence)
   onTodoRecurrenceChanged;
   final Future<void> Function(TodoEntry, TodoEntry, bool) onReorder;
-  final Future<void> Function(TodoSubtaskDragData, TodoEntry, bool) onPromoteSubtask;
+  final Future<void> Function(TodoSubtaskDragData, TodoEntry, bool)
+  onPromoteSubtask;
+  final Future<void> Function(
+    TodoSubtaskDragData, {
+    required int targetParentId,
+    String? targetSubtaskId,
+    bool after,
+  })
+  onMoveSubtask;
   final void Function(TodoEntry, Offset, VoidCallback) onMenu;
   final Future<void> Function(TodoEntry, String) onEdit;
   final ValueChanged<bool> onEditFocusChanged;
@@ -2253,7 +2403,9 @@ class _TodoSpeechBubble extends StatefulWidget {
 class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
   final _editController = TextEditingController();
   final _editFocusNode = FocusNode();
+  final _editFieldRegionKey = GlobalKey();
   int? _editingTodoId;
+  bool _editingAtPointerDown = false;
   final Set<int> _addingSubtaskTodoIds = <int>{};
 
   void _startAddingSubtask(TodoEntry todo) =>
@@ -2318,20 +2470,31 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
     super.dispose();
   }
 
-  void _handleEditFocus() => widget.onEditFocusChanged(_editFocusNode.hasFocus);
+  void _handleEditFocus() {
+    widget.onEditFocusChanged(_editFocusNode.hasFocus);
+  }
 
-  Future<void> _startEditing(TodoEntry todo) async {
+  Future<void> _startEditing(TodoEntry todo, {bool selectAll = false}) async {
     if (todo.completedAt != null || _editingTodoId == todo.id) return;
     if (_editingTodoId != null) await _finishEditing();
     _editController.text = todo.title;
     setState(() => _editingTodoId = todo.id);
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted || _editingTodoId != todo.id) return;
+    if (Platform.isWindows && !_isFlutterTest) {
+      try {
+        await windowManager.focus();
+      } catch (_) {}
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || _editingTodoId != todo.id) return;
+    }
     _editFocusNode.requestFocus();
-    _editController.selection = TextSelection(
-      baseOffset: 0,
-      extentOffset: _editController.text.length,
-    );
+    _editController.selection = selectAll
+        ? TextSelection(
+            baseOffset: 0,
+            extentOffset: _editController.text.length,
+          )
+        : TextSelection.collapsed(offset: _editController.text.length);
   }
 
   Future<void> _finishEditing() async {
@@ -2363,12 +2526,55 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
     if (mounted) onClose();
   }
 
+  Widget _buildBubbleTopLevelDropTarget(
+    TodoEntry target, {
+    required bool after,
+  }) {
+    return DragTarget<TodoSubtaskDragData>(
+      onWillAcceptWithDetails: (details) => true,
+      onAcceptWithDetails: (details) =>
+          widget.onPromoteSubtask(details.data, target, after),
+      builder: (context, candidates, rejected) => SizedBox(
+        height: candidates.isEmpty ? 18 : 34,
+        width: double.infinity,
+        child: candidates.isEmpty
+            ? null
+            : DecoratedBox(
+                decoration: const BoxDecoration(color: Color(0x44ffb6c1)),
+                child: const Center(
+                  child: Text(
+                    '放到这里成为顶层 Todo',
+                    style: TextStyle(fontSize: 11, color: Color(0xff9b5968)),
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Listener(
       behavior: HitTestBehavior.opaque,
+      onPointerDown: (_) => _editingAtPointerDown = _editingTodoId != null,
       onPointerUp: (event) {
-        if (_editFocusNode.hasFocus) return;
+        if (_editingTodoId != null && _editingAtPointerDown) {
+          final renderObject = _editFieldRegionKey.currentContext
+              ?.findRenderObject();
+          if (renderObject is RenderBox && renderObject.hasSize) {
+            final origin = renderObject.localToGlobal(Offset.zero);
+            final bounds = Rect.fromLTWH(
+              origin.dx,
+              origin.dy,
+              renderObject.size.width,
+              renderObject.size.height,
+            );
+            if (!bounds.contains(event.position)) {
+              unawaited(_finishEditing());
+            }
+          }
+          return;
+        }
         final p = event.localPosition;
         if (p.dy <= 24) return;
         final inHeaderClose = p.dx >= 250 && p.dy <= 42;
@@ -2476,9 +2682,10 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                                           editing: false,
                                           editController: _editController,
                                           editFocusNode: _editFocusNode,
+                                          editFieldRegionKey:
+                                              _editFieldRegionKey,
                                           onEditTap: () {},
                                           onEditSubmitted: () {},
-                                          onEditTapOutside: (_) {},
                                           onBlankTap: onBlankTap,
                                           onToggle: () =>
                                               onToggle(todos[index]),
@@ -2491,7 +2698,9 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                                           onRecurrenceChanged: (_) {},
                                           onMenu: (_) {},
                                           onReorder: widget.onReorder,
-                                          onPromoteSubtask: widget.onPromoteSubtask,
+                                          onPromoteSubtask:
+                                              widget.onPromoteSubtask,
+                                          onMoveSubtask: widget.onMoveSubtask,
                                         ),
                                   ),
                                 ),
@@ -2508,48 +2717,87 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                           : GestureDetector(
                               behavior: HitTestBehavior.opaque,
                               onTap: onBlankTap,
-                              child: ListView.separated(
+                              child: ListView(
                                 physics: const _BubbleScrollPhysics(),
                                 padding: EdgeInsets.zero,
-                                itemCount: todos.length,
-                                itemBuilder: (context, index) {
-                                  final todo = todos[index];
-                                  return _TodoBubbleRow(
-                                    todo: todo,
-                                    editing: _editingTodoId == todo.id,
-                                    editController: _editController,
-                                    editFocusNode: _editFocusNode,
-                                    onEditTap: () => _startEditing(todo),
-                                    onEditSubmitted: _finishEditing,
-                                    onEditTapOutside: (_) => _finishEditing(),
-                                    onBlankTap: onBlankTap,
-                                    onToggle: () => onToggle(todo),
-                                    addingSubtask: _addingSubtaskTodoIds
-                                        .contains(todo.id),
-                                    onAddSubtask: () =>
-                                        _startAddingSubtask(todo),
-                                    onSubmitSubtask: (title) =>
-                                        _finishAddingSubtask(todo, title),
-                                    onToggleSubtask: (subtask) =>
-                                        widget.onToggleSubtask(todo, subtask),
-                                    onRenameSubtask: (subtask, title) => widget
-                                        .onRenameSubtask(todo, subtask, title),
-                                    onMakeSubtask: (dragged) =>
-                                        widget.onMakeSubtask(dragged, todo),
-                                    onRecurrenceChanged: (value) =>
-                                        onTodoRecurrenceChanged(todo, value),
-                                    onMenu: (position) => onMenu(
-                                      todo,
-                                      position,
-                                      () => unawaited(_startEditing(todo)),
+                                children: [
+                                  _buildBubbleTopLevelDropTarget(
+                                    todos.first,
+                                    after: false,
+                                  ),
+                                  for (
+                                    var index = 0;
+                                    index < todos.length;
+                                    index++
+                                  ) ...[
+                                    _TodoBubbleRow(
+                                      todo: todos[index],
+                                      editing:
+                                          _editingTodoId == todos[index].id,
+                                      editController: _editController,
+                                      editFocusNode: _editFocusNode,
+                                      editFieldRegionKey: _editFieldRegionKey,
+                                      onEditTap: () => _startEditing(
+                                        todos[index],
+                                        selectAll: true,
+                                      ),
+                                      onEditSubmitted: _finishEditing,
+                                      onBlankTap: onBlankTap,
+                                      onToggle: () => onToggle(todos[index]),
+                                      addingSubtask: _addingSubtaskTodoIds
+                                          .contains(todos[index].id),
+                                      onAddSubtask: () =>
+                                          _startAddingSubtask(todos[index]),
+                                      onSubmitSubtask: (title) =>
+                                          _finishAddingSubtask(
+                                            todos[index],
+                                            title,
+                                          ),
+                                      onToggleSubtask: (subtask) =>
+                                          widget.onToggleSubtask(
+                                            todos[index],
+                                            subtask,
+                                          ),
+                                      onRenameSubtask: (subtask, title) =>
+                                          widget.onRenameSubtask(
+                                            todos[index],
+                                            subtask,
+                                            title,
+                                          ),
+                                      onMakeSubtask: (dragged) => widget
+                                          .onMakeSubtask(dragged, todos[index]),
+                                      onRecurrenceChanged: (value) =>
+                                          onTodoRecurrenceChanged(
+                                            todos[index],
+                                            value,
+                                          ),
+                                      onMenu: (position) => onMenu(
+                                        todos[index],
+                                        position,
+                                        () => unawaited(
+                                          _startEditing(
+                                            todos[index],
+                                            selectAll: true,
+                                          ),
+                                        ),
+                                      ),
+                                      onReorder: widget.onReorder,
+                                      onPromoteSubtask: (drag, target, after) =>
+                                          widget.onPromoteSubtask(
+                                            drag,
+                                            target,
+                                            after,
+                                          ),
+                                      onMoveSubtask: widget.onMoveSubtask,
                                     ),
-                                    onReorder: widget.onReorder,
-                                    onPromoteSubtask: (drag, target, after) =>
-                                        widget.onPromoteSubtask(drag, target, after),
-                                  );
-                                },
-                                separatorBuilder: (_, _) =>
-                                    const SizedBox(height: 10),
+                                    if (index < todos.length - 1)
+                                      const SizedBox(height: 10),
+                                  ],
+                                  _buildBubbleTopLevelDropTarget(
+                                    todos.last,
+                                    after: true,
+                                  ),
+                                ],
                               ),
                             ),
                     ),
@@ -2568,34 +2816,37 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                               color: const Color(0xfffff0f3),
                               borderRadius: BorderRadius.circular(8),
                             ),
-                            child: Stack(
-                              alignment: Alignment.centerRight,
-                              children: [
-                                TextField(
-                                  controller: controller,
-                                  focusNode: focusNode,
-                                  onSubmitted: (_) => onAdd(),
-                                  onTapOutside: (_) => onAdd(),
-                                  textInputAction: TextInputAction.done,
-                                  style: const TextStyle(
-                                    fontFamily: 'Microsoft YaHei',
-                                    fontSize: 12,
-                                    color: Color(0xff4a4a4a),
+                            child: TextFieldTapRegion(
+                              child: Stack(
+                                alignment: Alignment.centerRight,
+                                children: [
+                                  TextField(
+                                    controller: controller,
+                                    focusNode: focusNode,
+                                    onSubmitted: (_) => onAdd(),
+                                    textInputAction: TextInputAction.done,
+                                    style: const TextStyle(
+                                      fontFamily: 'Microsoft YaHei',
+                                      fontSize: 12,
+                                      color: Color(0xff4a4a4a),
+                                    ),
+                                    decoration: const InputDecoration(
+                                      border: InputBorder.none,
+                                      isDense: true,
+                                      contentPadding: EdgeInsets.only(
+                                        right: 28,
+                                      ),
+                                    ),
                                   ),
-                                  decoration: const InputDecoration(
-                                    border: InputBorder.none,
-                                    isDense: true,
-                                    contentPadding: EdgeInsets.only(right: 28),
-                                  ),
-                                ),
-                                if (controller.text.isNotEmpty)
-                                  _RecurrenceInputButton(
-                                    visible: true,
-                                    value: recurrence,
-                                    onChanged: onRecurrenceChanged,
-                                    bubbleStyle: true,
-                                  ),
-                              ],
+                                  if (controller.text.isNotEmpty)
+                                    _RecurrenceInputButton(
+                                      visible: true,
+                                      value: recurrence,
+                                      onChanged: onRecurrenceChanged,
+                                      bubbleStyle: true,
+                                    ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
@@ -2743,9 +2994,9 @@ class _TodoBubbleRow extends StatelessWidget {
     required this.editing,
     required this.editController,
     required this.editFocusNode,
+    required this.editFieldRegionKey,
     required this.onEditTap,
     required this.onEditSubmitted,
-    required this.onEditTapOutside,
     required this.onBlankTap,
     required this.onToggle,
     required this.addingSubtask,
@@ -2758,15 +3009,16 @@ class _TodoBubbleRow extends StatelessWidget {
     required this.onMenu,
     required this.onReorder,
     required this.onPromoteSubtask,
+    required this.onMoveSubtask,
   });
 
   final TodoEntry todo;
   final bool editing;
   final TextEditingController editController;
   final FocusNode editFocusNode;
+  final GlobalKey editFieldRegionKey;
   final VoidCallback onEditTap;
   final VoidCallback onEditSubmitted;
-  final TapRegionCallback onEditTapOutside;
   final VoidCallback onBlankTap;
   final VoidCallback onToggle;
   final bool addingSubtask;
@@ -2778,7 +3030,15 @@ class _TodoBubbleRow extends StatelessWidget {
   final ValueChanged<TodoRecurrence> onRecurrenceChanged;
   final ValueChanged<Offset> onMenu;
   final Future<void> Function(TodoEntry, TodoEntry, bool) onReorder;
-  final Future<void> Function(TodoSubtaskDragData, TodoEntry, bool) onPromoteSubtask;
+  final Future<void> Function(TodoSubtaskDragData, TodoEntry, bool)
+  onPromoteSubtask;
+  final Future<void> Function(
+    TodoSubtaskDragData, {
+    required int targetParentId,
+    String? targetSubtaskId,
+    bool after,
+  })
+  onMoveSubtask;
 
   @override
   Widget build(BuildContext context) {
@@ -2786,10 +3046,16 @@ class _TodoBubbleRow extends StatelessWidget {
     return Column(
       children: [
         DragTarget<Object>(
-          onWillAcceptWithDetails: (details) => details.data is TodoSubtaskDragData ||
-              (details.data is TodoEntry && (details.data as TodoEntry).id != todo.id),
+          onWillAcceptWithDetails: (details) =>
+              details.data is TodoSubtaskDragData ||
+              (details.data is TodoEntry &&
+                  (details.data as TodoEntry).id != todo.id),
           onAcceptWithDetails: (details) => details.data is TodoSubtaskDragData
-              ? onPromoteSubtask(details.data as TodoSubtaskDragData, todo, false)
+              ? onPromoteSubtask(
+                  details.data as TodoSubtaskDragData,
+                  todo,
+                  false,
+                )
               : onReorder(details.data as TodoEntry, todo, false),
           builder: (context, candidates, rejected) => SizedBox(
             height: 8,
@@ -2799,51 +3065,88 @@ class _TodoBubbleRow extends StatelessWidget {
                 : const ColoredBox(color: Color(0x22ff8fa4)),
           ),
         ),
-        LongPressDraggable<TodoEntry>(
-          data: todo,
-          delay: const Duration(milliseconds: 180),
-          dragAnchorStrategy: pointerDragAnchorStrategy,
-          feedback: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: 260,
-              height: 24,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              color: const Color(0xe6ffffff),
-              alignment: Alignment.centerLeft,
-              child: Text(todo.title, overflow: TextOverflow.ellipsis),
-            ),
-          ),
-          childWhenDragging: Opacity(opacity: 0.35, child: _buildRow(context, includeSubtasks: false)),
-          child: DragTarget<TodoEntry>(
-            onWillAcceptWithDetails: (details) =>
-                details.data.id != todo.id && todo.completedAt == null,
-            onAcceptWithDetails: (details) => onMakeSubtask(details.data),
-            builder: (context, candidates, rejected) =>
-                SizedBox(key: targetKey, child: _buildRow(context, includeSubtasks: false)),
-          ),
-        ),
-        DragTarget<Object>(
-          onWillAcceptWithDetails: (details) => details.data is TodoSubtaskDragData ||
-              (details.data is TodoEntry && (details.data as TodoEntry).id != todo.id),
-          onAcceptWithDetails: (details) => details.data is TodoSubtaskDragData
-              ? onPromoteSubtask(details.data as TodoSubtaskDragData, todo, true)
-              : onReorder(details.data as TodoEntry, todo, true),
-          builder: (context, candidates, rejected) => SizedBox(
-            height: 10,
-            width: double.infinity,
-            child: candidates.isEmpty
-                ? null
-                : const ColoredBox(color: Color(0x22ff8fa4)),
-          ),
-        ),
+        _buildTodoDragTarget(context, targetKey),
         if (todo.subtasks.isNotEmpty) _buildSubtaskRows(),
-        if (addingSubtask) _BubbleNewSubtaskEditor(onSubmitted: onSubmitSubtask),
+        if (addingSubtask)
+          _BubbleNewSubtaskEditor(onSubmitted: onSubmitSubtask),
+        _buildTopLevelAfterDropTarget(),
       ],
     );
   }
 
-  Widget _buildRow(BuildContext context, {bool includeSubtasks = true}) {
+  Widget _buildTopLevelAfterDropTarget() => DragTarget<Object>(
+    onWillAcceptWithDetails: (details) =>
+        details.data is TodoSubtaskDragData ||
+        (details.data is TodoEntry &&
+            (details.data as TodoEntry).id != todo.id),
+    onAcceptWithDetails: (details) => details.data is TodoSubtaskDragData
+        ? onPromoteSubtask(details.data as TodoSubtaskDragData, todo, true)
+        : onReorder(details.data as TodoEntry, todo, true),
+    builder: (context, candidates, rejected) => SizedBox(
+      height: candidates.isEmpty ? 12 : 28,
+      width: double.infinity,
+      child: candidates.isEmpty
+          ? null
+          : DecoratedBox(
+              decoration: const BoxDecoration(color: Color(0x44ffb6c1)),
+              child: const Center(
+                child: Text(
+                  '放到这里成为顶层 Todo',
+                  style: TextStyle(fontSize: 11, color: Color(0xff9b5968)),
+                ),
+              ),
+            ),
+    ),
+  );
+
+  Widget _buildTodoDragTarget(BuildContext context, Key targetKey) {
+    final target = DragTarget<Object>(
+      onWillAcceptWithDetails: (details) =>
+          !editing &&
+          todo.completedAt == null &&
+          ((details.data is TodoEntry &&
+                  (details.data as TodoEntry).id != todo.id) ||
+              details.data is TodoSubtaskDragData),
+      onAcceptWithDetails: (details) => details.data is TodoSubtaskDragData
+          ? onMoveSubtask(
+              details.data as TodoSubtaskDragData,
+              targetParentId: todo.id,
+            )
+          : onMakeSubtask(details.data as TodoEntry),
+      builder: (context, candidates, rejected) => Stack(
+        key: targetKey,
+        children: [
+          _buildRow(context, includeSubtasks: false, titleDraggable: !editing),
+          if (candidates.isNotEmpty)
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0x33ffb6c1),
+                  border: Border.all(color: const Color(0xffff8fa4), width: 2),
+                ),
+                child: const Center(
+                  child: Text(
+                    '放到这里成为子项',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xff9b5968),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+    return target;
+  }
+
+  Widget _buildRow(
+    BuildContext context, {
+    bool includeSubtasks = true,
+    bool titleDraggable = false,
+  }) {
     final completed = todo.completedAt != null;
     return Listener(
       onPointerDown: (_) {},
@@ -2895,63 +3198,68 @@ class _TodoBubbleRow extends StatelessWidget {
                               data: TextSelectionTheme.of(context).copyWith(
                                 selectionColor: const Color(0xffffb6c1),
                               ),
-                              child: TextField(
-                                key: ValueKey('bubble-edit-todo-${todo.id}'),
-                                controller: editController,
-                                focusNode: editFocusNode,
-                                onSubmitted: (_) => onEditSubmitted(),
-                                onTapOutside: onEditTapOutside,
-                                textInputAction: TextInputAction.done,
-                                minLines: 1,
-                                maxLines: null,
-                                style: const TextStyle(
-                                  fontFamily: 'Microsoft YaHei',
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                  color: Color(0xff4a4a4a),
-                                ),
-                                decoration: const InputDecoration(
-                                  border: InputBorder.none,
-                                  isDense: true,
-                                  contentPadding: EdgeInsets.zero,
+                              child: TextFieldTapRegion(
+                                key: editFieldRegionKey,
+                                child: TextField(
+                                  key: ValueKey('bubble-edit-todo-${todo.id}'),
+                                  controller: editController,
+                                  focusNode: editFocusNode,
+                                  autofocus: true,
+                                  onTap: editFocusNode.requestFocus,
+                                  onSubmitted: (_) => onEditSubmitted(),
+                                  keyboardType: TextInputType.text,
+                                  textInputAction: TextInputAction.done,
+                                  minLines: 1,
+                                  maxLines: 1,
+                                  style: const TextStyle(
+                                    fontFamily: 'Microsoft YaHei',
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xff4a4a4a),
+                                  ),
+                                  decoration: const InputDecoration(
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                  ),
                                 ),
                               ),
                             )
-                          : GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: onEditTap,
-                              onSecondaryTapDown: (details) =>
-                                  onMenu(details.globalPosition),
-                              child: Wrap(
-                                crossAxisAlignment: WrapCrossAlignment.center,
-                                spacing: 4,
-                                children: [
-                                  Text(
-                                    todo.title,
-                                    softWrap: true,
-                                    style: textStyle,
-                                  ),
-                                ],
-                              ),
-                            ),
+                          : _buildTodoTitle(textStyle, titleDraggable),
                       if (includeSubtasks && todo.subtasks.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 5),
                           child: Column(
                             children: todo.subtasks
+                                .asMap()
+                                .entries
                                 .map(
-                                  (subtask) => _BubbleSubtaskRow(
+                                  (entry) => _BubbleSubtaskRow(
                                     key: ValueKey(
-                                      'bubble-subtask-${todo.id}-${subtask.id}',
+                                      'bubble-subtask-${todo.id}-${entry.value.id}-${entry.key}',
                                     ),
-                                    subtask: subtask,
+                                    subtask: entry.value,
                                     parentId: todo.id,
                                     parentCompleted: completed,
-                                    onToggle: () => onToggleSubtask(subtask),
+                                    onToggle: () =>
+                                        onToggleSubtask(entry.value),
                                     onRename: (value) =>
-                                        onRenameSubtask(subtask, value),
+                                        onRenameSubtask(entry.value, value),
                                     onPromote: () => onPromoteSubtask(
-                                      TodoSubtaskDragData(parentId: todo.id, subtaskId: subtask.id), todo, false),
+                                      TodoSubtaskDragData(
+                                        parentId: todo.id,
+                                        subtaskId: entry.value.id,
+                                      ),
+                                      todo,
+                                      false,
+                                    ),
+                                    onMove: (drag, targetSubtaskId, after) =>
+                                        onMoveSubtask(
+                                          drag,
+                                          targetParentId: todo.id,
+                                          targetSubtaskId: targetSubtaskId,
+                                          after: after,
+                                        ),
                                   ),
                                 )
                                 .toList(),
@@ -2996,19 +3304,70 @@ class _TodoBubbleRow extends StatelessWidget {
     );
   }
 
+  Widget _buildTodoTitle(TextStyle textStyle, bool draggable) {
+    final title = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onDoubleTap: onEditTap,
+      onSecondaryTapDown: (details) => onMenu(details.globalPosition),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        children: [Text(todo.title, softWrap: true, style: textStyle)],
+      ),
+    );
+    if (!draggable) return title;
+    return LongPressDraggable<TodoEntry>(
+      data: todo,
+      delay: const Duration(milliseconds: 180),
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      feedback: Material(
+        color: Colors.transparent,
+        child: Container(
+          width: 260,
+          height: 24,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          color: const Color(0xe6ffffff),
+          alignment: Alignment.centerLeft,
+          child: Text(todo.title, overflow: TextOverflow.ellipsis),
+        ),
+      ),
+      child: title,
+    );
+  }
+
   Widget _buildSubtaskRows() => Padding(
     padding: const EdgeInsets.only(top: 5, left: 22),
     child: Column(
-      children: todo.subtasks.map((subtask) => _BubbleSubtaskRow(
-        key: ValueKey('bubble-subtask-${todo.id}-${subtask.id}'),
-        subtask: subtask,
-        parentId: todo.id,
-        parentCompleted: todo.completedAt != null,
-        onToggle: () => onToggleSubtask(subtask),
-        onRename: (value) => onRenameSubtask(subtask, value),
-        onPromote: () => onPromoteSubtask(
-          TodoSubtaskDragData(parentId: todo.id, subtaskId: subtask.id), todo, false),
-      )).toList(),
+      children: todo.subtasks
+          .asMap()
+          .entries
+          .map(
+            (entry) => _BubbleSubtaskRow(
+              key: ValueKey(
+                'bubble-subtask-${todo.id}-${entry.value.id}-${entry.key}',
+              ),
+              subtask: entry.value,
+              parentId: todo.id,
+              parentCompleted: todo.completedAt != null,
+              onToggle: () => onToggleSubtask(entry.value),
+              onRename: (value) => onRenameSubtask(entry.value, value),
+              onPromote: () => onPromoteSubtask(
+                TodoSubtaskDragData(
+                  parentId: todo.id,
+                  subtaskId: entry.value.id,
+                ),
+                todo,
+                false,
+              ),
+              onMove: (drag, targetSubtaskId, after) => onMoveSubtask(
+                drag,
+                targetParentId: todo.id,
+                targetSubtaskId: targetSubtaskId,
+                after: after,
+              ),
+            ),
+          )
+          .toList(),
     ),
   );
 }
@@ -3022,6 +3381,7 @@ class _BubbleSubtaskRow extends StatefulWidget {
     required this.onToggle,
     required this.onRename,
     required this.onPromote,
+    required this.onMove,
   });
 
   final TodoSubtask subtask;
@@ -3030,6 +3390,7 @@ class _BubbleSubtaskRow extends StatefulWidget {
   final VoidCallback onToggle;
   final ValueChanged<String> onRename;
   final VoidCallback onPromote;
+  final Future<void> Function(TodoSubtaskDragData, String?, bool) onMove;
 
   @override
   State<_BubbleSubtaskRow> createState() => _BubbleSubtaskRowState();
@@ -3037,17 +3398,35 @@ class _BubbleSubtaskRow extends StatefulWidget {
 
 class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
   bool _editing = false;
+  final _focusNode = FocusNode();
+
+  void _startEditing() {
+    if (_editing || widget.parentCompleted) return;
+    setState(() => _editing = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_editing) return;
+      _focusNode.requestFocus();
+      _controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _controller.text.length,
+      );
+    });
+  }
 
   Future<void> _showSubtaskMenu(Offset position) async {
     final selected = await showMenu<String>(
       context: context,
-      position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
-      items: const [
-        PopupMenuItem<String>(value: 'edit', child: Text('编辑')),
-      ],
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        position.dx,
+        position.dy,
+      ),
+      items: const [PopupMenuItem<String>(value: 'edit', child: Text('编辑'))],
     );
-    if (selected == 'edit' && mounted) setState(() => _editing = true);
+    if (selected == 'edit' && mounted) _startEditing();
   }
+
   late final TextEditingController _controller = TextEditingController(
     text: widget.subtask.title,
   );
@@ -3055,7 +3434,13 @@ class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
   @override
   void didUpdateWidget(covariant _BubbleSubtaskRow oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!_controller.selection.isValid &&
+    if (oldWidget.subtask.id != widget.subtask.id) {
+      _controller.value = TextEditingValue(
+        text: widget.subtask.title,
+        selection: TextSelection.collapsed(offset: widget.subtask.title.length),
+      );
+      _editing = false;
+    } else if (!_controller.selection.isValid &&
         _controller.text != widget.subtask.title) {
       _controller.text = widget.subtask.title;
     }
@@ -3063,98 +3448,126 @@ class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
 
   @override
   void dispose() {
+    _focusNode.dispose();
     _controller.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => LongPressDraggable<TodoSubtaskDragData>(
-    data: TodoSubtaskDragData(parentId: widget.parentId, subtaskId: widget.subtask.id),
-    delay: Duration.zero,
-    hapticFeedbackOnStart: false,
-    feedback: Material(color: Colors.transparent, child: Text(widget.subtask.title)),
-    child: Padding(
-    padding: const EdgeInsets.only(top: 3),
-    child: Row(
-      children: [
-        GestureDetector(
-          onTap: widget.parentCompleted ? null : widget.onToggle,
-          child: Container(
-            width: 14,
-            height: 14,
-            decoration: BoxDecoration(
-              color: widget.subtask.isCompleted
-                  ? const Color(0xffffb6c1)
-                  : Colors.white,
-              border: widget.subtask.isCompleted
-                  ? null
-                  : Border.all(color: const Color(0xffffb6c1), width: 1.5),
-              shape: BoxShape.circle,
-            ),
-            child: widget.subtask.isCompleted
-                ? const Icon(Icons.check, size: 8, color: Colors.white)
-                : null,
-          ),
-        ),
-        const SizedBox(width: 7),
-        Expanded(
-          child: widget.parentCompleted
-              ? Text(
-                  widget.subtask.title,
-                  style: const TextStyle(
-                    fontFamily: 'Microsoft YaHei',
-                    fontSize: 11,
-                    color: Color(0xff9ca3af),
-                    decoration: TextDecoration.lineThrough,
-                  ),
-                )
-              : _editing
-              ? TextField(
-                  controller: _controller,
-                  contextMenuBuilder: (context, editableTextState) =>
-                      const SizedBox.shrink(),
-                  enableInteractiveSelection: false,
-                  onChanged: widget.onRename,
-                  onSubmitted: widget.onRename,
-                  style: TextStyle(
-                    fontFamily: 'Microsoft YaHei',
-                    fontSize: 11,
-                    color: widget.subtask.isCompleted
-                        ? const Color(0xff9ca3af)
-                        : const Color(0xff4a4a4a),
-                    decoration: widget.subtask.isCompleted
-                        ? TextDecoration.lineThrough
-                        : null,
-                  ),
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    border: InputBorder.none,
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                )
-              : GestureDetector(
-                  onDoubleTap: () => setState(() => _editing = true),
-                  onSecondaryTapDown: (details) =>
-                      _showSubtaskMenu(details.globalPosition),
-                  child: Text(
-                    widget.subtask.title,
-                    style: TextStyle(
-                      fontFamily: 'Microsoft YaHei',
-                      fontSize: 11,
-                      color: widget.subtask.isCompleted
-                          ? const Color(0xff9ca3af)
-                          : const Color(0xff4a4a4a),
-                      decoration: widget.subtask.isCompleted
-                          ? TextDecoration.lineThrough
-                          : null,
-                    ),
-                  ),
+  Widget build(BuildContext context) {
+    final drag = TodoSubtaskDragData(
+      parentId: widget.parentId,
+      subtaskId: widget.subtask.id,
+    );
+    final row = LongPressDraggable<TodoSubtaskDragData>(
+      data: drag,
+      maxSimultaneousDrags: _editing ? 0 : 1,
+      delay: const Duration(milliseconds: 180),
+      hapticFeedbackOnStart: false,
+      feedback: Material(
+        color: Colors.transparent,
+        child: Text(widget.subtask.title),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 3),
+        child: Row(
+          children: [
+            GestureDetector(
+              onTap: widget.parentCompleted ? null : widget.onToggle,
+              child: Container(
+                width: 14,
+                height: 14,
+                decoration: BoxDecoration(
+                  color: widget.subtask.isCompleted
+                      ? const Color(0xffffb6c1)
+                      : Colors.white,
+                  border: widget.subtask.isCompleted
+                      ? null
+                      : Border.all(color: const Color(0xffffb6c1), width: 1.5),
+                  shape: BoxShape.circle,
                 ),
+                child: widget.subtask.isCompleted
+                    ? const Icon(Icons.check, size: 8, color: Colors.white)
+                    : null,
+              ),
+            ),
+            const SizedBox(width: 7),
+            Expanded(
+              child: widget.parentCompleted
+                  ? Text(
+                      widget.subtask.title,
+                      style: const TextStyle(
+                        fontFamily: 'Microsoft YaHei',
+                        fontSize: 11,
+                        color: Color(0xff9ca3af),
+                        decoration: TextDecoration.lineThrough,
+                      ),
+                    )
+                  : _editing
+                  ? TextField(
+                      controller: _controller,
+                      focusNode: _focusNode,
+                      autofocus: true,
+                      enableInteractiveSelection: true,
+                      onChanged: widget.onRename,
+                      onSubmitted: widget.onRename,
+                      style: TextStyle(
+                        fontFamily: 'Microsoft YaHei',
+                        fontSize: 11,
+                        color: widget.subtask.isCompleted
+                            ? const Color(0xff9ca3af)
+                            : const Color(0xff4a4a4a),
+                        decoration: widget.subtask.isCompleted
+                            ? TextDecoration.lineThrough
+                            : null,
+                      ),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    )
+                  : GestureDetector(
+                      onDoubleTap: _startEditing,
+                      onSecondaryTapDown: (details) =>
+                          _showSubtaskMenu(details.globalPosition),
+                      child: Text(
+                        widget.subtask.title,
+                        style: TextStyle(
+                          fontFamily: 'Microsoft YaHei',
+                          fontSize: 11,
+                          color: widget.subtask.isCompleted
+                              ? const Color(0xff9ca3af)
+                              : const Color(0xff4a4a4a),
+                          decoration: widget.subtask.isCompleted
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
+                      ),
+                    ),
+            ),
+          ],
         ),
-      ],
-    ),
-    ),
-  );
+      ),
+    );
+    return DragTarget<TodoSubtaskDragData>(
+      onWillAcceptWithDetails: (details) =>
+          details.data.subtaskId != widget.subtask.id,
+      onAcceptWithDetails: (details) {
+        final box = context.findRenderObject() as RenderBox?;
+        final local = box?.globalToLocal(details.offset);
+        final after = local == null || local.dy >= (box!.size.height / 2);
+        unawaited(widget.onMove(details.data, widget.subtask.id, after));
+      },
+      builder: (context, candidates, rejected) => AnimatedContainer(
+        duration: const Duration(milliseconds: 100),
+        color: candidates.isEmpty
+            ? Colors.transparent
+            : const Color(0x120067c0),
+        child: row,
+      ),
+    );
+  }
 }
 
 class _BubbleNewSubtaskEditor extends StatefulWidget {

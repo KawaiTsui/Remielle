@@ -176,6 +176,48 @@ void main() {
     expect(selectionTheme.data.selectionColor, const Color(0xffffb6c1));
   });
 
+  testWidgets('bubble Todo editing accepts text input', (tester) async {
+    await tester.pumpWidget(const RemielleApp());
+    final input = find.byType(TextField);
+    await tester.enterText(input, '原始标题');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('原始标题'), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(PopupMenuItem<String>, '编辑'));
+    await tester.pumpAndSettle();
+
+    final editInput = find.byKey(const ValueKey('bubble-edit-todo-1'));
+    await tester.enterText(editInput, '修改后的标题');
+    expect(tester.widget<TextField>(editInput).controller!.text, '修改后的标题');
+  });
+
+  testWidgets(
+    'double-click bubble Todo editing selects text and accepts input',
+    (tester) async {
+      await tester.pumpWidget(const RemielleApp());
+      final input = find.byType(TextField);
+      await tester.enterText(input, '单击编辑');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('单击编辑'));
+      await tester.pump(const Duration(milliseconds: 80));
+      await tester.tap(find.text('单击编辑'));
+      await tester.pumpAndSettle();
+
+      final editInput = find.byKey(const ValueKey('bubble-edit-todo-1'));
+      final editField = tester.widget<TextField>(editInput);
+      expect(
+        editField.controller!.selection,
+        const TextSelection(baseOffset: 0, extentOffset: 4),
+      );
+      await tester.enterText(editInput, '单击后输入');
+      expect(tester.widget<TextField>(editInput).controller!.text, '单击后输入');
+    },
+  );
+
   testWidgets('系统文本光标激活和结束时播放忙碌动画', (tester) async {
     await tester.pumpWidget(const RemielleApp());
     await tester.pump();
@@ -301,6 +343,23 @@ void main() {
       _petAnimation(tester, 'assets/animations/d_win.gif').asset,
       'assets/animations/d_win.gif',
     );
+  });
+
+  testWidgets('bubble Todo editing can recover after deleting all text', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const RemielleApp());
+    final input = find.byType(TextField);
+    await tester.enterText(input, '可清空后继续编辑');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('可清空后继续编辑'));
+    await tester.pumpAndSettle();
+    final editInput = find.byKey(const ValueKey('bubble-edit-todo-1'));
+    await tester.enterText(editInput, '');
+    await tester.enterText(editInput, '重新输入');
+    expect(tester.widget<TextField>(editInput).controller!.text, '重新输入');
   });
 
   testWidgets('external caret loss does not interrupt local bubble input', (
@@ -479,6 +538,28 @@ void main() {
     );
   });
 
+  testWidgets('bubble recurrence selection does not submit the draft Todo', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const RemielleApp());
+    final input = find.byType(TextField);
+
+    await tester.enterText(input, '循环草稿');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.sync));
+    await tester.pumpAndSettle();
+
+    expect(find.text('每天'), findsOneWidget);
+    await tester.tap(find.text('每天'));
+    await tester.pump();
+
+    expect(tester.widget<TextField>(input).controller!.text, '循环草稿');
+
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    expect(find.text('循环草稿'), findsOneWidget);
+  });
+
   testWidgets('点击 Todo 页空白处可以完成添加', (tester) async {
     await tester.pumpWidget(const ControlPanelApp());
     await tester.pump();
@@ -602,6 +683,78 @@ void main() {
 
     expect(restored.subtasks.length, 2);
     expect(restored.subtasks.first.isCompleted, isTrue);
+    final todos = <TodoEntry>[
+      TodoEntry(
+        id: 1,
+        title: 'A',
+        createdAt: DateTime(2026, 9, 11),
+        subtasks: const [
+          TodoSubtask(id: 'a', title: 'A1'),
+          TodoSubtask(id: 'b', title: 'A2'),
+          TodoSubtask(id: 'c', title: 'A3'),
+        ],
+      ),
+      TodoEntry(
+        id: 2,
+        title: 'B',
+        createdAt: DateTime(2026, 9, 11),
+        subtasks: const [TodoSubtask(id: 'd', title: 'B1')],
+      ),
+    ];
+    expect(
+      moveTodoSubtask(
+        todos,
+        const TodoSubtaskDragData(parentId: 1, subtaskId: 'c'),
+        targetParentId: 1,
+        targetSubtaskId: 'a',
+      ),
+      isTrue,
+    );
+    expect(todos.first.subtasks.map((item) => item.id), ['c', 'a', 'b']);
+    expect(
+      moveTodoSubtask(
+        todos,
+        const TodoSubtaskDragData(parentId: 1, subtaskId: 'a'),
+        targetParentId: 2,
+      ),
+      isTrue,
+    );
+    expect(todos.first.subtasks.map((item) => item.id), ['c', 'b']);
+    expect(todos[1].subtasks.map((item) => item.id), ['d', 'a']);
+    expect(
+      moveTodoSubtask(
+        todos,
+        const TodoSubtaskDragData(parentId: 2, subtaskId: 'd'),
+        targetParentId: 1,
+        targetSubtaskId: 'c',
+      ),
+      isTrue,
+    );
+    expect(todos[1].subtasks.map((item) => item.id), ['a']);
+    expect(todos.first.subtasks.map((item) => item.id), ['d', 'c', 'b']);
+    expect(
+      promoteTodoSubtask(
+        todos,
+        const TodoSubtaskDragData(parentId: 1, subtaskId: 'c'),
+        targetTodoId: 1,
+        after: false,
+        newTodoId: 3,
+      ),
+      isFalse,
+    );
+    expect(todos.length, 2);
+    expect(
+      promoteTodoSubtask(
+        todos,
+        const TodoSubtaskDragData(parentId: 1, subtaskId: 'c'),
+        targetTodoId: 2,
+        after: true,
+        newTodoId: 3,
+      ),
+      isTrue,
+    );
+    expect(todos.length, 3);
+    expect(todos.last.title, 'A3');
     expect(TodoEntry.fromJson({'id': 10, 'title': '旧任务'}).subtasks, isEmpty);
   });
 

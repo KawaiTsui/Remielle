@@ -1,4 +1,4 @@
-﻿part of 'main.dart';
+part of 'main.dart';
 
 ThemeData _controlPanelTheme() {
   const accent = Color(0xff0078d4);
@@ -582,6 +582,73 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     await _savePanelData();
   }
 
+  Future<void> _promoteSubtask(
+    TodoSubtaskDragData drag,
+    TodoEntry target, {
+    required bool after,
+  }) async {
+    final next = List<TodoEntry>.of(_todos);
+    if (!promoteTodoSubtask(
+      next,
+      drag,
+      targetTodoId: target.id,
+      after: after,
+      newTodoId: _nextTodoId++,
+      allowSameParent: true,
+    )) {
+      return;
+    }
+    setState(() {
+      _todos
+        ..clear()
+        ..addAll(next);
+    });
+    await _savePanelData();
+  }
+
+  Future<void> _moveSubtask(
+    TodoSubtaskDragData drag, {
+    required int targetParentId,
+    String? targetSubtaskId,
+    bool after = false,
+  }) async {
+    final next = List<TodoEntry>.of(_todos);
+    if (!moveTodoSubtask(
+      next,
+      drag,
+      targetParentId: targetParentId,
+      targetSubtaskId: targetSubtaskId,
+      after: after,
+    )) {
+      return;
+    }
+    setState(() {
+      _todos
+        ..clear()
+        ..addAll(next);
+      _expandedSubtaskTodoIds.add(targetParentId);
+    });
+    await _savePanelData();
+  }
+
+  Future<void> _acceptTodoDrop(
+    Object data,
+    TodoEntry target, {
+    required bool after,
+  }) async {
+    if (data is TodoSubtaskDragData) {
+      await _promoteSubtask(data, target, after: after);
+    } else if (data is TodoEntry) {
+      await _dropTodo(
+        data,
+        _startOfDay(target.dueAt ?? target.createdAt),
+        target.completedAt != null,
+        after: after ? target : null,
+        before: after ? null : target,
+      );
+    }
+  }
+
   Future<void> _showTodoMenu(TodoEntry todo, Offset globalPosition) async {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final position = overlay.globalToLocal(globalPosition);
@@ -638,17 +705,38 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       if (value != null) await _setTodoRecurrence(todo, value);
     }
     if (selected == 'dueDate' && mounted) {
-      final date = await showDatePicker(
+      final value = await showMenu<String>(
         context: context,
-        initialDate: todo.dueAt ?? todo.createdAt,
-        firstDate: DateTime(2000),
-        lastDate: DateTime(2100),
+        position: RelativeRect.fromSize(
+          Rect.fromLTWH(position.dx, position.dy, 0, 0),
+          overlay.size,
+        ),
+        items: const [
+          PopupMenuItem(value: 'today', child: Text('今天')),
+          PopupMenuItem(value: 'tomorrow', child: Text('明天')),
+          PopupMenuItem(value: 'nextWeek', child: Text('下周')),
+          PopupMenuItem(value: 'custom', child: Text('自定义日期')),
+        ],
       );
+      DateTime? date;
+      final now = DateTime.now();
+      if (value == 'today') date = now;
+      if (value == 'tomorrow') date = now.add(const Duration(days: 1));
+      if (value == 'nextWeek') date = now.add(const Duration(days: 7));
+      if (value == 'custom') {
+        if (!mounted) return;
+        date = await showDatePicker(
+          context: context,
+          initialDate: todo.dueAt ?? todo.createdAt,
+          firstDate: DateTime(2000),
+          lastDate: DateTime(2100),
+        );
+      }
       final index = _todos.indexWhere((item) => item.id == todo.id);
       if (date != null && index >= 0) {
         setState(
           () => _todos[index] = _todos[index].copyWith(
-            dueAt: _startOfDay(date),
+            dueAt: _startOfDay(date!),
             nextTodoUserModified: todo.generatedFromTodoId != null,
           ),
         );
@@ -1329,57 +1417,96 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     bool compact = false,
   }) => Column(
     children: [
-      DragTarget<TodoEntry>(
-        onWillAcceptWithDetails: (details) => details.data.id != todo.id,
-        onAcceptWithDetails: (details) => _dropTodo(
-          details.data,
-          _startOfDay(todo.dueAt ?? todo.createdAt),
-          completed,
-          before: todo,
-        ),
+      DragTarget<Object>(
+        onWillAcceptWithDetails: (details) =>
+            (details.data is TodoEntry &&
+                (details.data as TodoEntry).id != todo.id) ||
+            details.data is TodoSubtaskDragData,
+        onAcceptWithDetails: (details) =>
+            _acceptTodoDrop(details.data, todo, after: false),
         builder: (context, candidates, rejected) => SizedBox(
-          height: compact ? 2 : 8,
+          height: candidates.isEmpty ? (compact ? 8 : 12) : 28,
           width: double.infinity,
           child: candidates.isEmpty
               ? null
-              : const ColoredBox(color: Color(0x220067c0)),
+              : const DecoratedBox(
+                  decoration: BoxDecoration(color: Color(0x220067c0)),
+                  child: Center(
+                    child: Text(
+                      '放到这里成为顶层 Todo',
+                      style: TextStyle(fontSize: 11, color: Color(0xff0067c0)),
+                    ),
+                  ),
+                ),
         ),
       ),
-      LongPressDraggable<TodoEntry>(
-        data: todo,
-        delay: const Duration(milliseconds: 180),
-        feedback: Material(
-          color: Colors.transparent,
-          child: _todoDragFeedback(todo, completed),
-        ),
-        childWhenDragging: Opacity(
-          opacity: 0.35,
-          child: _buildTodoRowBody(todo, completed: completed, includeSubtasks: false),
-        ),
-        child: DragTarget<TodoEntry>(
-          onWillAcceptWithDetails: (details) =>
-              details.data.id != todo.id && !completed,
-          onAcceptWithDetails: (details) => _makeSubtask(details.data, todo),
-          builder: (context, candidates, rejected) =>
-              _buildTodoRowBody(todo, completed: completed, includeSubtasks: false),
+      DragTarget<Object>(
+        onWillAcceptWithDetails: (details) =>
+            !completed &&
+            ((details.data is TodoEntry &&
+                    (details.data as TodoEntry).id != todo.id) ||
+                details.data is TodoSubtaskDragData),
+        onAcceptWithDetails: (details) => details.data is TodoSubtaskDragData
+            ? _moveSubtask(
+                details.data as TodoSubtaskDragData,
+                targetParentId: todo.id,
+              )
+            : _makeSubtask(details.data as TodoEntry, todo),
+        builder: (context, candidates, rejected) => Stack(
+          children: [
+            _buildTodoRowBody(
+              todo,
+              completed: completed,
+              includeSubtasks: false,
+              titleDraggable: true,
+            ),
+            if (candidates.isNotEmpty)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0x220078d4),
+                    border: Border.all(
+                      color: const Color(0xff0078d4),
+                      width: 2,
+                    ),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      '放到这里成为子项',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xff005a9e),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
-      if (todo.subtasks.isNotEmpty)
-        _buildControlPanelSubtasks(todo, completed),
-      DragTarget<TodoEntry>(
-        onWillAcceptWithDetails: (details) => details.data.id != todo.id,
-        onAcceptWithDetails: (details) => _dropTodo(
-          details.data,
-          _startOfDay(todo.dueAt ?? todo.createdAt),
-          completed,
-          after: todo,
-        ),
+      if (todo.subtasks.isNotEmpty) _buildControlPanelSubtasks(todo, completed),
+      DragTarget<Object>(
+        onWillAcceptWithDetails: (details) =>
+            (details.data is TodoEntry &&
+                (details.data as TodoEntry).id != todo.id) ||
+            details.data is TodoSubtaskDragData,
+        onAcceptWithDetails: (details) =>
+            _acceptTodoDrop(details.data, todo, after: true),
         builder: (context, candidates, rejected) => SizedBox(
-          height: compact ? 2 : 8,
+          height: candidates.isEmpty ? (compact ? 6 : 12) : 28,
           width: double.infinity,
           child: candidates.isEmpty
               ? null
-              : const ColoredBox(color: Color(0x220067c0)),
+              : const DecoratedBox(
+                  decoration: BoxDecoration(color: Color(0x220067c0)),
+                  child: Center(
+                    child: Text(
+                      '放到这里成为顶层 Todo',
+                      style: TextStyle(fontSize: 11, color: Color(0xff0067c0)),
+                    ),
+                  ),
+                ),
         ),
       ),
     ],
@@ -1389,6 +1516,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     TodoEntry todo, {
     required bool completed,
     bool includeSubtasks = true,
+    bool titleDraggable = false,
   }) => MouseRegion(
     key: ValueKey('todo-row-${todo.id}'),
     cursor: SystemMouseCursors.basic,
@@ -1472,26 +1600,10 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                         onSubmitted: (_) => _finishEditing(),
                       )
                     else
-                      GestureDetector(
-                        key: ValueKey('todo-title-${todo.id}'),
-                        behavior: HitTestBehavior.opaque,
-                        onTap: completed ? null : () => _startEditing(todo),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            todo.title,
-                            softWrap: true,
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: completed
-                                  ? const Color(0xff666666)
-                                  : const Color(0xff1a1a1a),
-                              decoration: completed
-                                  ? TextDecoration.lineThrough
-                                  : TextDecoration.none,
-                            ),
-                          ),
-                        ),
+                      _buildControlPanelTodoTitle(
+                        todo,
+                        completed,
+                        draggable: titleDraggable,
                       ),
                     if (todo.subtasks.isNotEmpty ||
                         todo.recurrence != TodoRecurrence.none ||
@@ -1546,10 +1658,13 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                           ],
                         ),
                       ),
-                    if (includeSubtasks && todo.subtasks.isNotEmpty &&
+                    if (includeSubtasks &&
+                        todo.subtasks.isNotEmpty &&
                         _expandedSubtaskTodoIds.contains(todo.id))
                       _buildControlPanelSubtasks(todo, completed),
-                    if (includeSubtasks && !completed && _addingSubtaskTodoId == todo.id)
+                    if (includeSubtasks &&
+                        !completed &&
+                        _addingSubtaskTodoId == todo.id)
                       _buildControlPanelSubtaskEditor(todo),
                   ],
                 ),
@@ -1584,56 +1699,121 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         child: Column(
           children: todo.subtasks
               .map(
-                (subtask) => LongPressDraggable<TodoSubtaskDragData>(
-                  data: TodoSubtaskDragData(
-                    parentId: todo.id,
-                    subtaskId: subtask.id,
-                  ),
-                  delay: Duration.zero,
-                  hapticFeedbackOnStart: false,
-                  feedback: Material(
-                    color: Colors.transparent,
-                    child: Text(subtask.title),
-                  ),
-                  child: Row(
+                (subtask) => Column(
                   children: [
-                    Checkbox(
-                      value: subtask.isCompleted,
-                      onChanged: parentCompleted
-                          ? null
-                          : (_) => _toggleSubtask(todo, subtask),
-                    ),
-                    Expanded(
-                      child: Text(
-                        subtask.title,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: parentCompleted
-                              ? const Color(0xff666666)
-                              : const Color(0xff1a1a1a),
-                          decoration: parentCompleted
-                              ? TextDecoration.lineThrough
-                              : null,
-                        ),
+                    _buildSubtaskDropZone(todo, subtask, after: false),
+                    LongPressDraggable<TodoSubtaskDragData>(
+                      data: TodoSubtaskDragData(
+                        parentId: todo.id,
+                        subtaskId: subtask.id,
+                      ),
+                      delay: const Duration(milliseconds: 180),
+                      hapticFeedbackOnStart: false,
+                      feedback: Material(
+                        color: Colors.transparent,
+                        child: Text(subtask.title),
+                      ),
+                      child: Row(
+                        children: [
+                          Checkbox(
+                            value: subtask.isCompleted,
+                            onChanged: parentCompleted
+                                ? null
+                                : (_) => _toggleSubtask(todo, subtask),
+                          ),
+                          Expanded(
+                            child: Text(
+                              subtask.title,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: parentCompleted
+                                    ? const Color(0xff666666)
+                                    : const Color(0xff1a1a1a),
+                                decoration: parentCompleted
+                                    ? TextDecoration.lineThrough
+                                    : null,
+                              ),
+                            ),
+                          ),
+                          if (!parentCompleted)
+                            SizedBox.square(
+                              dimension: 26,
+                              child: IconButton(
+                                tooltip: '删除子项',
+                                padding: EdgeInsets.zero,
+                                onPressed: () => _deleteSubtask(todo, subtask),
+                                icon: const Icon(Icons.remove, size: 14),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
-                    if (!parentCompleted)
-                      SizedBox.square(
-                        dimension: 26,
-                        child: IconButton(
-                          tooltip: '删除子项',
-                          padding: EdgeInsets.zero,
-                          onPressed: () => _deleteSubtask(todo, subtask),
-                          icon: const Icon(Icons.remove, size: 14),
-                        ),
-                      ),
+                    _buildSubtaskDropZone(todo, subtask, after: true),
                   ],
-                  ),
                 ),
               )
               .toList(),
         ),
       );
+
+  Widget _buildSubtaskDropZone(
+    TodoEntry todo,
+    TodoSubtask target, {
+    required bool after,
+  }) => DragTarget<Object>(
+    onWillAcceptWithDetails: (details) => details.data is TodoSubtaskDragData,
+    onAcceptWithDetails: (details) => _moveSubtask(
+      details.data as TodoSubtaskDragData,
+      targetParentId: todo.id,
+      targetSubtaskId: target.id,
+      after: after,
+    ),
+    builder: (context, candidates, rejected) => SizedBox(
+      height: candidates.isEmpty ? 3 : 7,
+      width: double.infinity,
+      child: candidates.isEmpty
+          ? null
+          : const ColoredBox(color: Color(0x220067c0)),
+    ),
+  );
+
+  Widget _buildControlPanelTodoTitle(
+    TodoEntry todo,
+    bool completed, {
+    required bool draggable,
+  }) {
+    final title = GestureDetector(
+      key: ValueKey('todo-title-${todo.id}'),
+      behavior: HitTestBehavior.opaque,
+      onTap: completed ? null : () => _startEditing(todo),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          todo.title,
+          softWrap: true,
+          style: TextStyle(
+            fontSize: 14,
+            color: completed
+                ? const Color(0xff666666)
+                : const Color(0xff1a1a1a),
+            decoration: completed
+                ? TextDecoration.lineThrough
+                : TextDecoration.none,
+          ),
+        ),
+      ),
+    );
+    if (!draggable) return title;
+    return LongPressDraggable<TodoEntry>(
+      data: todo,
+      delay: const Duration(milliseconds: 180),
+      feedback: Material(
+        color: Colors.transparent,
+        child: _todoDragFeedback(todo, completed),
+      ),
+      child: title,
+    );
+  }
 
   Widget _buildControlPanelSubtaskEditor(TodoEntry todo) => Padding(
     padding: const EdgeInsets.only(top: 5, left: 2),
@@ -2594,6 +2774,142 @@ class TodoSubtask {
     'title': title,
     'isCompleted': isCompleted,
   };
+}
+
+/// Applies one hierarchy drag operation to a todo list.
+///
+/// The list is mutated only after all ids and target constraints have been
+/// validated, so both the settings panel and bubble window share the same
+/// no-duplicate/no-self-drop behavior.
+bool moveTodoSubtask(
+  List<TodoEntry> todos,
+  TodoSubtaskDragData drag, {
+  required int targetParentId,
+  String? targetSubtaskId,
+  bool after = false,
+}) {
+  final sourceIndex = todos.indexWhere((todo) => todo.id == drag.parentId);
+  final targetIndex = todos.indexWhere((todo) => todo.id == targetParentId);
+  if (sourceIndex < 0 || targetIndex < 0) return false;
+  if (targetSubtaskId == drag.subtaskId) return false;
+  final source = todos[sourceIndex];
+  final target = todos[targetIndex];
+  if (target.completedAt != null) return false;
+  final subtaskIndex = source.subtasks.indexWhere(
+    (subtask) => subtask.id == drag.subtaskId,
+  );
+  if (subtaskIndex < 0) return false;
+
+  final subtask = source.subtasks[subtaskIndex];
+  // Subtask ids are globally unique in normal data. If legacy data already
+  // contains the same id in the destination, reject the move so the source
+  // item is never silently replaced or appears to disappear.
+  if (sourceIndex != targetIndex &&
+      target.subtasks.any((item) => item.id == subtask.id)) {
+    return false;
+  }
+  final sourceSubtasks = List<TodoSubtask>.of(source.subtasks)
+    ..removeAt(subtaskIndex);
+  final targetSubtasks = sourceIndex == targetIndex
+      ? sourceSubtasks
+      : List<TodoSubtask>.of(target.subtasks);
+  var insertionIndex = targetSubtasks.length;
+  if (targetSubtaskId != null) {
+    final targetSubtaskIndex = targetSubtasks.indexWhere(
+      (item) => item.id == targetSubtaskId,
+    );
+    if (targetSubtaskIndex < 0) return false;
+    insertionIndex = targetSubtaskIndex + (after ? 1 : 0);
+  }
+  targetSubtasks.insert(insertionIndex, subtask);
+
+  final sourceUpdated = source.copyWith(
+    subtasks: sourceIndex == targetIndex ? targetSubtasks : sourceSubtasks,
+    nextTodoUserModified: source.generatedFromTodoId != null
+        ? true
+        : source.nextTodoUserModified,
+  );
+  if (sourceIndex == targetIndex) {
+    todos[sourceIndex] = sourceUpdated;
+  } else {
+    todos[sourceIndex] = sourceUpdated;
+    todos[targetIndex] = target.copyWith(
+      subtasks: targetSubtasks,
+      nextTodoUserModified: target.generatedFromTodoId != null
+          ? true
+          : target.nextTodoUserModified,
+    );
+  }
+  return true;
+}
+
+TodoEntry todoFromSubtask(TodoEntry parent, TodoSubtask subtask, int id) =>
+    TodoEntry(
+      id: id,
+      title: subtask.title.trim(),
+      createdAt: parent.createdAt,
+      sortOrder: parent.sortOrder,
+      completedAt: subtask.isCompleted ? DateTime.now() : null,
+      recurrence: parent.recurrence,
+      subtasks: const [],
+      dueAt: parent.dueAt,
+      recurrenceSeriesId: parent.recurrenceSeriesId,
+      recurrenceNextEligibleAt: parent.recurrenceNextEligibleAt,
+      generatedFromTodoId: parent.generatedFromTodoId,
+      generatedNextTodoId: parent.generatedNextTodoId,
+      generatedByCompletion: parent.generatedByCompletion,
+      nextTodoUserModified:
+          parent.nextTodoUserModified || parent.generatedFromTodoId != null,
+      reminderEnabled: parent.reminderEnabled,
+      reminderOffsetMinutes: parent.reminderOffsetMinutes,
+      remindedAt: parent.remindedAt,
+      reminderAt: parent.reminderAt,
+    );
+
+bool promoteTodoSubtask(
+  List<TodoEntry> todos,
+  TodoSubtaskDragData drag, {
+  required int targetTodoId,
+  required bool after,
+  required int newTodoId,
+  bool allowSameParent = false,
+}) {
+  final sourceIndex = todos.indexWhere((todo) => todo.id == drag.parentId);
+  final targetIndex = todos.indexWhere((todo) => todo.id == targetTodoId);
+  if (sourceIndex < 0 ||
+      targetIndex < 0 ||
+      (!allowSameParent && sourceIndex == targetIndex)) {
+    return false;
+  }
+  final source = todos[sourceIndex];
+  final subtask = source.subtasks.cast<TodoSubtask?>().firstWhere(
+    (item) => item!.id == drag.subtaskId,
+    orElse: () => null,
+  );
+  if (subtask == null || subtask.title.trim().isEmpty) return false;
+  final sourceWithoutSubtask = source.copyWith(
+    subtasks: source.subtasks.where((item) => item.id != subtask.id).toList(),
+    nextTodoUserModified: source.generatedFromTodoId != null
+        ? true
+        : source.nextTodoUserModified,
+  );
+  if (sourceIndex == targetIndex) {
+    // A child can be dropped immediately before or after its own parent to
+    // become a top-level item. Remove the child first, then insert the new
+    // item relative to the parent's original position.
+    todos[sourceIndex] = sourceWithoutSubtask;
+    todos.insert(
+      sourceIndex + (after ? 1 : 0),
+      todoFromSubtask(source, subtask, newTodoId),
+    );
+    return true;
+  }
+  todos[sourceIndex] = sourceWithoutSubtask;
+  todos.insert(
+    targetIndex + (after ? 1 : 0),
+    todoFromSubtask(source, subtask, newTodoId),
+  );
+  return true;
 }
 
 bool _isSameDay(DateTime a, DateTime b) =>
