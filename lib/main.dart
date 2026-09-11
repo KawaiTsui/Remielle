@@ -562,6 +562,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _bubbleResizing = false;
   double _bubbleResizeStartHeight = _petBubbleMinHeight;
   Offset? _bubbleResizeStartWindowPosition;
+  Future<void>? _bubbleResizePrepare;
   double? _bubbleResizeStartCursorY;
   bool _bubbleResizeSampleInFlight = false;
   bool _bubbleResizeSamplePending = false;
@@ -888,7 +889,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       _petScale = nextScale;
       _bubbleHeight = nextBubbleHeight;
     });
-    if (_isFlutterTest) return;
+    if (_isFlutterTest || _bubbleResizing) return;
     _setNativeLayout(nextScale, nextBubbleHeight);
   }
 
@@ -937,6 +938,26 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _bubbleResizeStartHeight = _bubbleHeight;
     _bubbleResizeStartWindowPosition = null;
     _bubbleResizeStartCursorY = null;
+    _bubbleResizePrepare = _prepareBubbleResizeWindow();
+  }
+
+  Future<void> _prepareBubbleResizeWindow() async {
+    if (_isFlutterTest) return;
+    final position = await windowManager.getPosition();
+    if (!_bubbleResizing || !mounted) return;
+    _bubbleResizeStartWindowPosition = position;
+    final currentWindowHeight = _petWindowHeightForLayout(
+      _petScale,
+      _bubbleHeight,
+    );
+    final reservedHeight = currentWindowHeight + max(0, position.dy);
+    await windowManager.setSize(
+      Size(max(_petBubbleWidth, _petStageWidth * _petScale), reservedHeight),
+    );
+    if (!_bubbleResizing || !mounted) return;
+    await windowManager.setPosition(
+      Offset(position.dx, position.dy - (reservedHeight - currentWindowHeight)),
+    );
   }
 
   void _updateBubbleResize(PointerMoveEvent event) {
@@ -958,15 +979,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
         _bubbleResizeStartHeight +
             (_bubbleResizeStartCursorY! - cursor.dy),
       );
-      final heightDelta = height - _bubbleResizeStartHeight;
       _setLayoutPreview(bubbleHeight: height);
-      if (!_isFlutterTest) {
-        _bubbleResizeStartWindowPosition ??= await windowManager.getPosition();
-        final position = _bubbleResizeStartWindowPosition!;
-        await windowManager.setPosition(
-          Offset(position.dx, position.dy - heightDelta),
-        );
-      }
     } finally {
       _bubbleResizeSampleInFlight = false;
       if (_bubbleResizeSamplePending) {
@@ -978,8 +991,41 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   void _endBubbleResize() {
     _bubbleResizing = false;
-    _bubbleResizeStartWindowPosition = null;
+    final finalHeight = _bubbleHeight;
+    final prepare = _bubbleResizePrepare;
+    final startPosition = _bubbleResizeStartWindowPosition;
+    final startHeight = _bubbleResizeStartHeight;
+    if (!_isFlutterTest) {
+      unawaited(
+        _commitBubbleResize(prepare, finalHeight, startPosition, startHeight),
+      );
+    }
+    _bubbleResizePrepare = null;
     _bubbleResizeStartCursorY = null;
+  }
+
+  Future<void> _commitBubbleResize(
+    Future<void>? prepare,
+    double finalHeight,
+    Offset? startPosition,
+    double startHeight,
+  ) async {
+    await prepare;
+    final origin =
+        startPosition ??
+        _bubbleResizeStartWindowPosition ??
+        await windowManager.getPosition();
+    final windowHeight = _petWindowHeightForLayout(_petScale, finalHeight);
+    await windowManager.setSize(
+      Size(max(_petBubbleWidth, _petStageWidth * _petScale), windowHeight),
+    );
+    await windowManager.setPosition(
+      Offset(
+        origin.dx,
+        origin.dy - (finalHeight - startHeight),
+      ),
+    );
+    _bubbleResizeStartWindowPosition = null;
   }
 
   Future<void> _refreshTodos() async {
@@ -2039,13 +2085,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
                         ? null
                         : _petStageHeight * _petScale + _petBubbleGap,
                     left: (_petWindowWidth - _petBubbleWidth) / 2,
-                    child: Listener(
-                      behavior: HitTestBehavior.translucent,
-                      onPointerDown: _beginBubbleResize,
-                      onPointerMove: _updateBubbleResize,
-                      onPointerUp: (_) => _endBubbleResize(),
-                      onPointerCancel: (_) => _endBubbleResize(),
-                      child: Stack(
+                    child: Stack(
                         clipBehavior: Clip.none,
                         children: [
                           _TodoSpeechBubble(
@@ -2103,7 +2143,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
                             ),
                           ),
                         ],
-                      ),
                     ),
                   ),
                 Transform.translate(
