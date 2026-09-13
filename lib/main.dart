@@ -269,11 +269,15 @@ class _BubbleScrollPhysics extends ClampingScrollPhysics {
   }
 }
 
-double _petWindowHeightForLayout(double scale, double bubbleHeight) =>
-    bubbleHeight +
-    _petBubbleTailHeight +
-    _petBubbleGap +
-    _petStageHeight * scale;
+double _petWindowHeightForLayout(double scale, double bubbleHeight) {
+  if (bubbleHeight <= 0) {
+    return _petStageHeight * scale;
+  }
+  return bubbleHeight +
+      _petBubbleTailHeight +
+      _petBubbleGap +
+      _petStageHeight * scale;
+}
 
 Future<void> main(List<String> args) async {
   final isControlPanel = args.contains('--control-panel');
@@ -317,7 +321,7 @@ Future<void> main(List<String> args) async {
     size: windowSize,
     minimumSize: Size(
       max(_petBubbleWidth, _petStageWidth * _minPetScale),
-      _petWindowHeightForLayout(_minPetScale, _petBubbleMinHeight),
+      _petWindowHeightForLayout(_minPetScale, 0.0),
     ),
     center: !positionUsable,
     backgroundColor: Colors.transparent,
@@ -574,6 +578,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _bubbleEditInputActive = false;
   bool _bubbleInputCaretLost = false;
   late bool _bubbleVisible;
+  Future<void> _windowLayoutQueue = Future<void>.value();
   List<TodoEntry> _todos = const [];
   _UpdateInfo? _updateInfo;
   _UpdateStatus _updateStatus = _UpdateStatus.idle;
@@ -890,21 +895,52 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       _bubbleHeight = nextBubbleHeight;
     });
     if (_isFlutterTest || _bubbleResizing) return;
-    _setNativeLayout(nextScale, nextBubbleHeight);
+    unawaited(_setNativeLayout(nextScale, nextBubbleHeight));
   }
 
   Future<void> _setNativeLayout(double scale, double bubbleHeight) async {
     if (_isFlutterTest) return;
-    await windowManager.setSize(
-      Size(
-        max(_petBubbleWidth, _petStageWidth * scale),
+    final operation = _windowLayoutQueue.then((_) => _applyPetWindowLayout());
+    _windowLayoutQueue = operation.catchError((_) {});
+    await operation;
+  }
+
+  Future<void> _applyPetWindowLayout() async {
+    try {
+      final currentBounds = await windowManager.getBounds();
+      final scale = _petScale;
+      final bubbleHeight = _bubbleVisible ? _bubbleHeight : 0.0;
+      final targetSize = Size(
+        max(_petBubbleWidth, _petStageWidth * scale).toDouble(),
         _petWindowHeightForLayout(scale, bubbleHeight),
-      ),
-    );
+      );
+      await windowManager.setBounds(
+        Rect.fromLTWH(
+          currentBounds.left,
+          currentBounds.bottom - targetSize.height,
+          targetSize.width,
+          targetSize.height,
+        ),
+      );
+    } on MissingPluginException {
+      // Widget tests do not load the native window manager plugin.
+    } catch (_) {
+      // A native layout update failure must not block the bubble toggle.
+    }
   }
 
   void _setBubbleVisible(bool visible) {
     if (mounted) setState(() => _bubbleVisible = visible);
+    if (_isFlutterTest) return;
+    final operation = _windowLayoutQueue.then((_) async {
+      if (!_bubbleVisible) {
+        // Submit the frame without the bubble before shrinking the window.
+        await WidgetsBinding.instance.endOfFrame;
+      }
+      if (!mounted) return;
+      await _applyPetWindowLayout();
+    });
+    _windowLayoutQueue = operation.catchError((_) {});
   }
 
   void _resetPetScale() => _setLayoutPreview(scale: 1.0);
@@ -2145,9 +2181,10 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
                         ],
                     ),
                   ),
-                Transform.translate(
+                Positioned(
                   key: const ValueKey('pet-animation-position'),
-                  offset: Offset.zero,
+                  left: (_petWindowWidth - _petStageWidth) / 2,
+                  bottom: 0,
                   child: SizedBox(
                     width: _petStageWidth,
                     height: _petStageHeight,
