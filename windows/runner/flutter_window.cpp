@@ -392,6 +392,32 @@ bool FlutterWindow::OnCreate() {
           result->Success();
           return;
         }
+        if (call.method_name() == "setBubbleWindowRegion") {
+          const auto* args =
+              std::get_if<flutter::EncodableMap>(call.arguments());
+          if (!args) {
+            result->Error("invalid_arguments");
+            return;
+          }
+          const auto visible_it =
+              args->find(flutter::EncodableValue("visible"));
+          const auto pet_height_it =
+              args->find(flutter::EncodableValue("petHeight"));
+          if (visible_it == args->end() || pet_height_it == args->end()) {
+            result->Error("invalid_arguments");
+            return;
+          }
+          const auto* visible = std::get_if<bool>(&visible_it->second);
+          const auto* pet_height =
+              std::get_if<double>(&pet_height_it->second);
+          if (!visible || !pet_height) {
+            result->Error("invalid_arguments");
+            return;
+          }
+          SetBubbleWindowRegion(*visible, *pet_height);
+          result->Success();
+          return;
+        }
         if (call.method_name() == "sendPetEvent") {
           const auto* event = std::get_if<std::string>(call.arguments());
           result->Success(flutter::EncodableValue(
@@ -552,6 +578,27 @@ void FlutterWindow::PublishCaretState(bool active) {
     system_channel_->InvokeMethod(
         "caretStateChanged",
         std::make_unique<flutter::EncodableValue>(active));
+  }
+}
+
+void FlutterWindow::SetBubbleWindowRegion(bool visible, double pet_height) {
+  const HWND window = GetHandle();
+  if (!window) return;
+  if (visible) {
+    SetWindowRgn(window, nullptr, FALSE);
+    return;
+  }
+
+  RECT bounds = {};
+  if (!GetWindowRect(window, &bounds)) return;
+  const int width = bounds.right - bounds.left;
+  const int height = bounds.bottom - bounds.top;
+  const double scale = static_cast<double>(GetDpiForWindow(window)) / 96.0;
+  const int pet_height_pixels = static_cast<int>(pet_height * scale);
+  HRGN pet_region =
+      CreateRectRgn(0, std::max(0, height - pet_height_pixels), width, height);
+  if (pet_region && !SetWindowRgn(window, pet_region, FALSE)) {
+    DeleteObject(pet_region);
   }
 }
 

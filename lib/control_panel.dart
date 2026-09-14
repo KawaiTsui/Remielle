@@ -127,7 +127,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   String _pendingSubtaskTitle = '';
   final Set<int> _expandedSubtaskTodoIds = <int>{};
   final Set<DateTime> _expandedArchiveDays = <DateTime>{};
-  final Set<DateTime> _expandedIncompleteArchiveDays = <DateTime>{};
   final Set<DateTime> _expandedPlannedDays = <DateTime>{};
   StreamSubscription<FileSystemEvent>? _todoFileWatcher;
   Timer? _todoRefreshDebounce;
@@ -1077,56 +1076,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       );
     }
 
-    if (_shouldShowLegacyTodoArchives) {
-      children
-        ..add(const SizedBox(height: 24))
-        ..add(_buildTodoSectionHeader('未完成'));
-      final incompleteGroups = _groupTodosByCreatedDay(
-        _todos.where(
-          (todo) =>
-              todo.completedAt == null &&
-              (todo.dueAt ?? todo.createdAt).isBefore(today),
-        ),
-      );
-      _addArchiveGroups(
-        children,
-        incompleteGroups,
-        completed: false,
-        expandedDays: _expandedIncompleteArchiveDays,
-      );
-      if (incompleteGroups.isEmpty) {
-        children.add(const _TodoEmptyState('没有未完成的历史待办'));
-      }
-
-      final completedGroups = _groupTodosByCompletedDay(
-        _todos.where((todo) => todo.completedAt != null),
-      );
-      children
-        ..add(const SizedBox(height: 24))
-        ..add(_buildTodoSectionHeader('已完成'));
-      _addArchiveGroups(
-        children,
-        completedGroups,
-        completed: true,
-        expandedDays: _expandedArchiveDays,
-      );
-      if (completedGroups.isEmpty) {
-        children.add(
-          DragTarget<TodoEntry>(
-            onAcceptWithDetails: (details) =>
-                _dropTodo(details.data, today, true),
-            builder: (context, candidates, rejected) => SizedBox(
-              height: 16,
-              width: double.infinity,
-              child: candidates.isEmpty
-                  ? null
-                  : const ColoredBox(color: Color(0x220067c0)),
-            ),
-          ),
-        );
-        children.add(const _TodoEmptyState('完成的 Todo 会自动归档到这里'));
-      }
-    }
     return Scrollbar(
       controller: _todoScrollController,
       thickness: 5,
@@ -1173,8 +1122,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     if (planned.isEmpty) children.add(const _TodoEmptyState('暂无未来计划'));
     return children;
   }
-
-  bool get _shouldShowLegacyTodoArchives => false;
 
   Widget _buildAllTasksPage() {
     final today = _startOfDay(DateTime.now());
@@ -1223,17 +1170,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     );
   }
 
-  Map<DateTime, List<TodoEntry>> _groupTodosByCreatedDay(
-    Iterable<TodoEntry> todos,
-  ) {
-    final groups = <DateTime, List<TodoEntry>>{};
-    for (final todo in todos) {
-      final day = _startOfDay(todo.createdAt);
-      (groups[day] ??= <TodoEntry>[]).add(todo);
-    }
-    return groups;
-  }
-
   Map<DateTime, List<TodoEntry>> _groupTodosByCompletedDay(
     Iterable<TodoEntry> todos,
   ) {
@@ -1277,35 +1213,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     }
   }
 
-  // ignore: unused_element
-  Widget _buildTodoList() {
-    final now = DateTime.now();
-    final todayTodos = visibleTodayTodos(_todos, now).toList()
-      ..sort((a, b) => todoSortAt(a).compareTo(todoSortAt(b)));
-    final completedTodos =
-        _todos.where((todo) => todo.completedAt != null).toList()
-          ..sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
-
-    return ListView(
-      padding: EdgeInsets.zero,
-      children: [
-        _buildTodoSectionHeader('今日待办'),
-        if (todayTodos.isEmpty)
-          const _TodoEmptyState('今天还没有待办事项')
-        else
-          ..._withDividers(todayTodos.map((todo) => _buildTodoRow(todo))),
-        const SizedBox(height: 24),
-        _buildTodoSectionHeader('已完成'),
-        if (completedTodos.isEmpty)
-          const _TodoEmptyState('完成的 Todo 会自动归档到这里')
-        else
-          ..._withDividers(
-            completedTodos.map((todo) => _buildTodoRow(todo, completed: true)),
-          ),
-      ],
-    );
-  }
-
   Widget _buildTodoSectionHeader(String title) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
@@ -1330,17 +1237,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     builder: (context, candidates, rejected) =>
         _buildTodoDateHeader(title, count, highlighted: candidates.isNotEmpty),
   );
-
-  List<Widget> _withDividers(Iterable<Widget> rows) {
-    final result = <Widget>[];
-    for (final row in rows) {
-      if (result.isNotEmpty) {
-        result.add(const Divider(height: 1, color: Color(0xffdedede)));
-      }
-      result.add(row);
-    }
-    return result;
-  }
 
   Widget _buildTodoDateHeader(
     String label,

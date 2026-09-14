@@ -487,27 +487,12 @@ const _localCaretLossConfirmDelay = Duration(milliseconds: 450);
 // only a final animation-level safety net.
 const _busyAnimationSafetyLimit = Duration(seconds: 15);
 
-File get _petEventFile {
-  final localAppData = Platform.environment['LOCALAPPDATA'];
-  final base = localAppData == null || localAppData.isEmpty
-      ? Directory.systemTemp.path
-      : localAppData;
-  return File('$base\\Remielle\\pet_events.log');
-}
-
 Future<void> _sendPetEvent(String event) async {
-  if (Platform.environment.containsKey('FLUTTER_TEST')) return;
-  if (Platform.isWindows) {
-    await _systemChannel.invokeMethod<void>('sendPetEvent', event);
+  if (Platform.environment.containsKey('FLUTTER_TEST') ||
+      !Platform.isWindows) {
     return;
   }
-  final file = _petEventFile;
-  await file.parent.create(recursive: true);
-  await file.writeAsString(
-    '${DateTime.now().microsecondsSinceEpoch}:$event\n',
-    mode: FileMode.append,
-    flush: true,
-  );
+  await _systemChannel.invokeMethod<void>('sendPetEvent', event);
 }
 
 class PetHome extends StatefulWidget {
@@ -565,13 +550,13 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   late double _bubbleHeight;
   bool _bubbleResizing = false;
   double _bubbleResizeStartHeight = _petBubbleMinHeight;
-  Offset? _bubbleResizeStartWindowPosition;
-  double? _bubbleResizeStartWindowBottom;
+  Rect? _bubbleResizeAnchorBounds;
   Future<void>? _bubbleResizePrepare;
+  Future<void>? _bubbleResizeDrain;
   double? _bubbleResizeStartCursorY;
-  bool _bubbleResizeSampleInFlight = false;
   bool _bubbleResizeSamplePending = false;
-  bool _bubbleResizeLayoutScheduled = false;
+  bool _bubbleResizeDrainRunning = false;
+  int _bubbleResizeSession = 0;
   bool _petVisible = true;
   bool _systemCaretActive = false;
   bool _caretIdleSuppressed = false;
@@ -581,7 +566,6 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _bubbleInputCaretLost = false;
   late bool _bubbleVisible;
   Future<void> _windowLayoutQueue = Future<void>.value();
-  int _windowLayoutRevision = 0;
   List<TodoEntry> _todos = const [];
   _UpdateInfo? _updateInfo;
   _UpdateStatus _updateStatus = _UpdateStatus.idle;
@@ -598,6 +582,13 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     _petScale = widget.initialPetScale.clamp(_minPetScale, _maxPetScale);
     _bubbleHeight = max(_petBubbleMinHeight, widget.initialBubbleHeight);
     _bubbleVisible = widget.initialBubbleVisible;
+    if (!_bubbleVisible && Platform.isWindows && !_isFlutterTest) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_bubbleVisible) {
+          unawaited(_syncBubbleWindowRegion(false));
+        }
+      });
+    }
     windowManager.addListener(this);
     trayManager.addListener(this);
     _initialize();
@@ -909,49 +900,39 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       _petScale = nextScale;
       _bubbleHeight = nextBubbleHeight;
     });
-    if (_isFlutterTest) return;
-    if (_bubbleResizing) {
-      _scheduleBubbleResizeLayout();
-      return;
-    }
+    if (_isFlutterTest || _bubbleResizing) return;
     unawaited(_setNativeLayout(nextScale, nextBubbleHeight));
-  }
-
-  void _scheduleBubbleResizeLayout() {
-    if (_bubbleResizeLayoutScheduled) return;
-    _bubbleResizeLayoutScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _bubbleResizeLayoutScheduled = false;
-      if (!mounted || !_bubbleResizing) return;
-      unawaited(_setNativeLayout(_petScale, _bubbleHeight));
-    });
   }
 
   Future<void> _setNativeLayout(double scale, double bubbleHeight) async {
     if (_isFlutterTest) return;
-    final revision = ++_windowLayoutRevision;
-    final operation = _windowLayoutQueue.then((_) async {
-      if (revision != _windowLayoutRevision) return;
-      await _applyPetWindowLayout();
-    });
+    final operation = _windowLayoutQueue.then(
+      (_) => _applyPetWindowLayout(
+        scale: _petScale,
+        bubbleHeight: _bubbleHeight,
+      ),
+    );
     _windowLayoutQueue = operation.catchError((_) {});
     await operation;
+    if (!_bubbleVisible) await _syncBubbleWindowRegion(false);
   }
 
-  Future<void> _applyPetWindowLayout() async {
+  Future<void> _applyPetWindowLayout({
+    required double scale,
+    required double bubbleHeight,
+    Rect? anchorBounds,
+  }) async {
+    if (_isFlutterTest) return;
     try {
-      final currentBounds = await windowManager.getBounds();
-      final scale = _petScale;
-      final bubbleHeight = _bubbleVisible ? _bubbleHeight : 0.0;
+      final currentBounds = anchorBounds ?? await windowManager.getBounds();
       final targetSize = Size(
         max(_petBubbleWidth, _petStageWidth * scale).toDouble(),
         _petWindowHeightForLayout(scale, bubbleHeight),
       );
-      final bottom = _bubbleResizeStartWindowBottom ?? currentBounds.bottom;
       await windowManager.setBounds(
         Rect.fromLTWH(
           currentBounds.left,
-          bottom - targetSize.height,
+          currentBounds.bottom - targetSize.height,
           targetSize.width,
           targetSize.height,
         ),
@@ -964,18 +945,28 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   void _setBubbleVisible(bool visible) {
-    if (mounted) setState(() => _bubbleVisible = visible);
-    if (_isFlutterTest) return;
-    final revision = ++_windowLayoutRevision;
-    final operation = _windowLayoutQueue.then((_) async {
-      if (!_bubbleVisible) {
-        // Submit the frame without the bubble before shrinking the window.
-        await WidgetsBinding.instance.endOfFrame;
-      }
-      if (!mounted || revision != _windowLayoutRevision) return;
-      await _applyPetWindowLayout();
-    });
-    _windowLayoutQueue = operation.catchError((_) {});
+    if (!mounted || _bubbleVisible == visible) return;
+    setState(() => _bubbleVisible = visible);
+    if (Platform.isWindows && !_isFlutterTest) {
+      unawaited(_syncBubbleWindowRegion(visible));
+    }
+  }
+
+  Future<void> _syncBubbleWindowRegion(bool visible) async {
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || _bubbleVisible != visible) return;
+    await _setNativeBubbleWindowRegion(visible);
+  }
+
+  Future<void> _setNativeBubbleWindowRegion(bool visible) async {
+    try {
+      await _systemChannel.invokeMethod<void>('setBubbleWindowRegion', {
+        'visible': visible,
+        'petHeight': _petStageHeight * _petScale,
+      });
+    } on MissingPluginException {
+      // Widget tests do not load the native system channel.
+    }
   }
 
   void _resetPetScale() => _setLayoutPreview(scale: 1.0);
@@ -1005,95 +996,111 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   void _beginBubbleResize(PointerDownEvent event) {
     if (event.buttons != kPrimaryMouseButton) return;
     if (event.localPosition.dy > _bubbleResizeHitHeight) return;
+    final session = ++_bubbleResizeSession;
     _bubbleResizing = true;
     _bubbleResizeStartHeight = _bubbleHeight;
-    _bubbleResizeStartWindowPosition = null;
-    _bubbleResizeStartWindowBottom = null;
+    _bubbleResizeAnchorBounds = null;
     _bubbleResizeStartCursorY = null;
-    _bubbleResizePrepare = _prepareBubbleResizeWindow();
+    _bubbleResizeSamplePending = false;
+    _bubbleResizePrepare = _prepareBubbleResize(session);
   }
 
-  Future<void> _prepareBubbleResizeWindow() async {
+  Future<void> _prepareBubbleResize(int session) async {
     if (_isFlutterTest) return;
-    final position = await windowManager.getPosition();
-    final size = await windowManager.getSize();
-    if (!_bubbleResizing || !mounted) return;
-    _bubbleResizeStartWindowPosition = position;
-    _bubbleResizeStartWindowBottom = position.dy + size.height;
+    final cursorFuture = screenRetriever.getCursorScreenPoint();
+    final boundsFuture = windowManager.getBounds();
+    final cursor = await cursorFuture;
+    final bounds = await boundsFuture;
+    if (!mounted || session != _bubbleResizeSession) return;
+    _bubbleResizeStartCursorY = cursor.dy;
+    _bubbleResizeAnchorBounds = bounds;
   }
 
   void _updateBubbleResize(PointerMoveEvent event) {
     if (!_bubbleResizing) return;
-    unawaited(_sampleBubbleResizeCursor());
+    _bubbleResizeSamplePending = true;
+    if (_bubbleResizeDrainRunning) return;
+    final drain = _drainBubbleResize(_bubbleResizeSession);
+    _bubbleResizeDrain = drain;
+    unawaited(drain);
   }
 
-  Future<void> _sampleBubbleResizeCursor() async {
-    if (!_bubbleResizing || !mounted) return;
-    if (_bubbleResizeSampleInFlight) {
-      _bubbleResizeSamplePending = true;
+  Future<void> _drainBubbleResize(int session) async {
+    _bubbleResizeDrainRunning = true;
+    try {
+      await _bubbleResizePrepare;
+      while (mounted &&
+          _bubbleResizing &&
+          session == _bubbleResizeSession &&
+          _bubbleResizeSamplePending) {
+        _bubbleResizeSamplePending = false;
+        final cursor = await screenRetriever.getCursorScreenPoint();
+        if (!mounted ||
+            !_bubbleResizing ||
+            session != _bubbleResizeSession) {
+          return;
+        }
+        await _applyBubbleResizeCursor(cursor.dy, session);
+      }
+    } finally {
+      _bubbleResizeDrainRunning = false;
+      if (mounted &&
+          _bubbleResizing &&
+          session == _bubbleResizeSession &&
+          _bubbleResizeSamplePending) {
+        final drain = _drainBubbleResize(session);
+        _bubbleResizeDrain = drain;
+        unawaited(drain);
+      }
+    }
+  }
+
+  Future<void> _applyBubbleResizeCursor(double cursorY, int session) async {
+    final startCursorY = _bubbleResizeStartCursorY;
+    final anchorBounds = _bubbleResizeAnchorBounds;
+    if (startCursorY == null ||
+        anchorBounds == null ||
+        !mounted ||
+        session != _bubbleResizeSession) {
       return;
     }
-    _bubbleResizeSampleInFlight = true;
-    final resizeSession = _bubbleResizePrepare;
-    try {
-      final cursor = await screenRetriever.getCursorScreenPoint();
-      if (!_bubbleResizing || !mounted ||
-          !identical(resizeSession, _bubbleResizePrepare)) {
-        return;
-      }
-      _bubbleResizeStartCursorY ??= cursor.dy;
-      final height = max(
-        _petBubbleMinHeight,
-        _bubbleResizeStartHeight +
-            (_bubbleResizeStartCursorY! - cursor.dy),
-      );
-      _setLayoutPreview(bubbleHeight: height);
-    } finally {
-      _bubbleResizeSampleInFlight = false;
-      if (_bubbleResizeSamplePending) {
-        _bubbleResizeSamplePending = false;
-        unawaited(_sampleBubbleResizeCursor());
-      }
+    final height = max(
+      _petBubbleMinHeight,
+      _bubbleResizeStartHeight + (startCursorY - cursorY),
+    ).toDouble();
+    if (height != _bubbleHeight) {
+      setState(() => _bubbleHeight = height);
     }
+    await _applyPetWindowLayout(
+      scale: _petScale,
+      bubbleHeight: height,
+      anchorBounds: anchorBounds,
+    );
   }
 
   void _endBubbleResize() {
+    if (!_bubbleResizing) return;
+    final session = _bubbleResizeSession;
+    final drain = _bubbleResizeDrain;
     _bubbleResizing = false;
     _bubbleResizeSamplePending = false;
-    _bubbleResizeLayoutScheduled = false;
-    if (!_isFlutterTest) {
-      unawaited(
-        _setNativeLayout(_petScale, _bubbleHeight).whenComplete(
-          () => _bubbleResizeStartWindowBottom = null,
-        ),
-      );
-    }
-    _bubbleResizePrepare = null;
-    _bubbleResizeStartCursorY = null;
+    unawaited(_finishBubbleResize(session, drain));
   }
 
-  Future<void> _commitBubbleResize(
-    Future<void>? prepare,
-    double finalHeight,
-    Offset? startPosition,
-    double startHeight,
-  ) async {
-    await prepare;
-    final origin =
-        startPosition ??
-        _bubbleResizeStartWindowPosition ??
-        await windowManager.getPosition();
-    final windowHeight = _petWindowHeightForLayout(_petScale, finalHeight);
-    final width = max(_petBubbleWidth, _petStageWidth * _petScale).toDouble();
-    await windowManager.setBounds(
-      Rect.fromLTWH(
-        origin.dx,
-        origin.dy - (finalHeight - startHeight),
-        width,
-        windowHeight,
-      ),
-    );
-    _bubbleResizeStartWindowPosition = null;
+  Future<void> _finishBubbleResize(int session, Future<void>? drain) async {
+    await drain;
+    await _bubbleResizePrepare;
+    if (!_isFlutterTest && mounted && session == _bubbleResizeSession) {
+      final cursor = await screenRetriever.getCursorScreenPoint();
+      if (mounted && session == _bubbleResizeSession) {
+        await _applyBubbleResizeCursor(cursor.dy, session);
+      }
+    }
+    if (session != _bubbleResizeSession) return;
+    _bubbleResizeAnchorBounds = null;
+    _bubbleResizePrepare = null;
+    _bubbleResizeDrain = null;
+    _bubbleResizeStartCursorY = null;
   }
 
   Future<void> _refreshTodos() async {

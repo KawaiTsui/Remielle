@@ -33,6 +33,7 @@ class FlutterWindow : public Win32Window {
   void RequestCaretStateQuery();
   void StartCaretStateQuery();
   void PublishCaretState(bool active);
+  void SetBubbleWindowRegion(bool visible, double pet_height);
 
   static LRESULT CALLBACK FlutterViewSubclassProc(
       HWND window, UINT message, WPARAM wparam, LPARAM lparam,

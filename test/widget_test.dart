@@ -11,13 +11,13 @@ Finder _petAnimationFinder(String asset) => find.byWidgetPredicate(
 AnimatedGif _petAnimation(WidgetTester tester, String asset) =>
     tester.widget<AnimatedGif>(_petAnimationFinder(asset));
 
-Transform _petAnimationPosition(WidgetTester tester, String asset) =>
-    tester.widget<Transform>(
+Positioned _petAnimationPosition(WidgetTester tester, String asset) =>
+    tester.widget<Positioned>(
       find.ancestor(
         of: _petAnimationFinder(asset),
         matching: find.byWidgetPredicate(
           (widget) =>
-              widget is Transform &&
+              widget is Positioned &&
               widget.key == const ValueKey('pet-animation-position'),
         ),
       ),
@@ -228,8 +228,8 @@ void main() {
       'assets/animations/d.gif',
     );
     var position = _petAnimationPosition(tester, 'assets/animations/d.gif');
-    expect(position.transform.getTranslation().x, 0);
-    expect(position.transform.getTranslation().y, 0);
+    expect(position.left, 0);
+    expect(position.bottom, 0);
 
     await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
     await tester.pump();
@@ -238,8 +238,8 @@ void main() {
       'assets/animations/d_win.gif',
     );
     position = _petAnimationPosition(tester, 'assets/animations/d_win.gif');
-    expect(position.transform.getTranslation().x, 0);
-    expect(position.transform.getTranslation().y, 0);
+    expect(position.left, 0);
+    expect(position.bottom, 0);
 
     await tester.pump(const Duration(milliseconds: 1300));
     expect(
@@ -247,8 +247,8 @@ void main() {
       'assets/animations/a.gif',
     );
     position = _petAnimationPosition(tester, 'assets/animations/a.gif');
-    expect(position.transform.getTranslation().x, 0);
-    expect(position.transform.getTranslation().y, 0);
+    expect(position.left, 0);
+    expect(position.bottom, 0);
   });
 
   testWidgets('全部完成后延迟显示庆祝状态并在五秒后恢复', (tester) async {
@@ -354,6 +354,8 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
+    await tester.tap(find.text('可清空后继续编辑'));
+    await tester.pump(const Duration(milliseconds: 80));
     await tester.tap(find.text('可清空后继续编辑'));
     await tester.pumpAndSettle();
     final editInput = find.byKey(const ValueKey('bubble-edit-todo-1'));
@@ -613,6 +615,9 @@ void main() {
     expect(find.byKey(const ValueKey('todo-created-date-1')), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('todo-checkbox-1')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('todo-tab')));
     await tester.pump();
 
     checkbox = tester.widget<Checkbox>(
