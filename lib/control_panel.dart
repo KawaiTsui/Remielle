@@ -25,7 +25,6 @@ ThemeData _controlPanelTheme() {
       shape: RoundedRectangleBorder(side: BorderSide(color: Color(0xffe5e7eb))),
     ),
     textTheme: base.textTheme.apply(
-      fontFamily: 'Microsoft YaHei',
       bodyColor: foreground,
       displayColor: foreground,
     ),
@@ -116,7 +115,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   TodoRecurrence _newTodoRecurrence = TodoRecurrence.none;
   int? _newTodoReminderOffsetMinutes;
   DateTime? _newTodoReminderAt;
-  DateTime _newTodoDueAt = _startOfDay(DateTime.now());
+  DateTime _newTodoDueAt = _defaultTodoDueDate(DateTime.now(), TodoRecurrence.none);
   bool _checkingForUpdate = false;
   bool _updatingStartup = false;
   bool _closing = false;
@@ -267,7 +266,7 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       _newTodoRecurrence = TodoRecurrence.none;
       _newTodoReminderOffsetMinutes = null;
       _newTodoReminderAt = null;
-      _newTodoDueAt = _startOfDay(DateTime.now());
+      _newTodoDueAt = _defaultTodoDueDate(DateTime.now(), TodoRecurrence.none);
     });
     _savePanelData();
   }
@@ -280,7 +279,19 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       lastDate: DateTime(2100),
     );
     if (picked != null && mounted) {
-      setState(() => _newTodoDueAt = _startOfDay(picked));
+      final pickedTime = await showTimePicker(
+        context: context,
+        initialTime: const TimeOfDay(hour: 23, minute: 59),
+      );
+      if (pickedTime == null) return;
+      setState(() => _newTodoDueAt = DateTime(
+            picked.year,
+            picked.month,
+            picked.day,
+            pickedTime.hour,
+            pickedTime.minute,
+            59,
+          ));
     }
   }
 
@@ -508,7 +519,10 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     final index = _todos.indexWhere((item) => item.id == todo.id);
     if (index < 0) return;
     setState(() {
-      _todos[index] = _todos[index].copyWith(recurrence: recurrence);
+      _todos[index] = _todos[index].copyWith(
+        recurrence: recurrence,
+        dueAt: _defaultTodoDueDate(DateTime.now(), recurrence),
+      );
     });
     await _savePanelData();
   }
@@ -730,12 +744,22 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           firstDate: DateTime(2000),
           lastDate: DateTime(2100),
         );
+        if (date != null && mounted) {
+          final pickedTime = await showTimePicker(
+            context: context,
+            initialTime: const TimeOfDay(hour: 23, minute: 59),
+          );
+          if (pickedTime != null) {
+            date = DateTime(date.year, date.month, date.day,
+                pickedTime.hour, pickedTime.minute, 59);
+          }
+        }
       }
       final index = _todos.indexWhere((item) => item.id == todo.id);
       if (date != null && index >= 0) {
         setState(
           () => _todos[index] = _todos[index].copyWith(
-            dueAt: _startOfDay(date!),
+            dueAt: value == 'custom' ? date! : _endOfDay(date!),
             nextTodoUserModified: todo.generatedFromTodoId != null,
           ),
         );
@@ -965,8 +989,13 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                           suffixIcon: _RecurrenceInputButton(
                             visible: _todoController.text.isNotEmpty,
                             value: _newTodoRecurrence,
-                            onChanged: (value) =>
-                                setState(() => _newTodoRecurrence = value),
+                            onChanged: (value) => setState(() {
+                              _newTodoRecurrence = value;
+                              _newTodoDueAt = _bubbleTodoDueDate(
+                                DateTime.now(),
+                                value,
+                              );
+                            }),
                           ),
                         ),
                         textInputAction: TextInputAction.done,
@@ -1513,7 +1542,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                               Text(
                                 '${todo.subtasks.where((item) => item.isCompleted).length}/${todo.subtasks.length}',
                                 style: const TextStyle(
-                                  fontFamily: 'Microsoft YaHei',
                                   fontSize: 11,
                                   color: Color(0xff6b7280),
                                 ),
@@ -1525,7 +1553,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                               Text(
                                 todoRecurrenceLabel(todo.recurrence),
                                 style: const TextStyle(
-                                  fontFamily: 'Microsoft YaHei',
                                   fontSize: 11,
                                   color: Color(0xff6b7280),
                                 ),
@@ -1545,7 +1572,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                                 child: Text(
                                   '截止 ${_formatTodoDate(todo.dueAt!)}',
                                   style: const TextStyle(
-                                    fontFamily: 'Microsoft YaHei',
                                     fontSize: 11,
                                     color: Color(0xff6b7280),
                                   ),
@@ -2367,13 +2393,8 @@ TodoEntry? nextRecurringTodo(
   final nextId =
       todos.fold<int>(0, (maxId, item) => item.id > maxId ? item.id : maxId) +
       1;
-  final date = _startOfDay(completedAt ?? todo.completedAt ?? DateTime.now());
-  final nextDate = switch (todo.recurrence) {
-    TodoRecurrence.daily => date.add(const Duration(days: 1)),
-    TodoRecurrence.weekly => date.add(Duration(days: 7 - date.weekday + 1)),
-    TodoRecurrence.monthly => DateTime(date.year, date.month + 1, 1),
-    TodoRecurrence.none => date,
-  };
+  final completed = completedAt ?? todo.completedAt ?? DateTime.now();
+  final nextDate = _nextRecurringDueDate(completed, todo.recurrence);
   final seriesId = todo.recurrenceSeriesId ?? todo.id.toString();
   final alreadyGenerated = todos.any(
     (item) =>
@@ -2389,7 +2410,7 @@ TodoEntry? nextRecurringTodo(
     title: todo.title,
     createdAt: nextDate,
     recurrence: todo.recurrence,
-    dueAt: nextDate,
+    dueAt: _defaultTodoDueDate(nextDate, todo.recurrence),
     recurrenceSeriesId: seriesId,
     generatedFromTodoId: todo.id,
     generatedByCompletion: true,
@@ -2406,17 +2427,20 @@ DateTime? nextRecurringEligibleAt(TodoEntry todo, DateTime completedAt) {
     return null;
   }
   final today = _startOfDay(completedAt);
-  final dueAt = _startOfDay(todo.dueAt ?? todo.createdAt);
-  if (dueAt.isBefore(today.subtract(_longOverdueRecurrenceThreshold))) {
+  final dueAt = todo.dueAt ?? _defaultTodoDueDate(completedAt, todo.recurrence);
+  if (completedAt.isAfter(dueAt) || dueAt.isBefore(today.subtract(_longOverdueRecurrenceThreshold))) {
     return null;
   }
-  return switch (todo.recurrence) {
-    TodoRecurrence.daily => today.add(const Duration(days: 1)),
-    TodoRecurrence.weekly => today.add(Duration(days: 7 - today.weekday + 1)),
-    TodoRecurrence.monthly => DateTime(today.year, today.month + 1, 1),
-    TodoRecurrence.none => null,
-  };
+  return _nextRecurringDueDate(completedAt, todo.recurrence);
 }
+
+DateTime _nextRecurringDueDate(DateTime date, TodoRecurrence recurrence) =>
+    switch (recurrence) {
+      TodoRecurrence.daily => date.add(const Duration(days: 1)),
+      TodoRecurrence.weekly => DateTime(date.year, date.month, date.day + (8 - date.weekday)),
+      TodoRecurrence.monthly => DateTime(date.year, date.month + 1, 1),
+      TodoRecurrence.none => date,
+    };
 
 List<TodoEntry> materializeDueRecurringTodos(
   Iterable<TodoEntry> source,
@@ -2460,7 +2484,7 @@ List<TodoEntry> materializeDueRecurringTodos(
         id: nextId++,
         title: template.title,
         createdAt: today,
-        dueAt: today,
+        dueAt: _defaultTodoDueDate(today, template.recurrence),
         recurrence: template.recurrence,
         recurrenceSeriesId: entry.key,
         subtasks: template.subtasks
@@ -2587,7 +2611,11 @@ class TodoEntry {
       title: json['title'] as String,
       createdAt: createdAt ?? DateTime.now(),
       sortOrder: sortOrder,
-      dueAt: dueAt ?? createdAt ?? DateTime.now(),
+      dueAt: dueAt ??
+          _defaultTodoDueDate(
+            createdAt ?? DateTime.now(),
+            recurrence,
+          ),
       completedAt: completedAt,
       recurrence: recurrence,
       subtasks: (json['subtasks'] as List<dynamic>? ?? const [])
@@ -2836,6 +2864,19 @@ Duration _timeUntilNextMidnight(DateTime now) {
 DateTime _startOfDay(DateTime value) =>
     DateTime(value.year, value.month, value.day);
 
+DateTime _endOfDay(DateTime value) =>
+    DateTime(value.year, value.month, value.day, 23, 59, 59, 999);
+
+DateTime _defaultTodoDueDate(DateTime value, TodoRecurrence recurrence) =>
+    switch (recurrence) {
+      TodoRecurrence.weekly => _endOfDay(DateTime(value.year, value.month, value.day + (7 - value.weekday))),
+      TodoRecurrence.monthly => _endOfDay(DateTime(value.year, value.month + 1, 0)),
+      TodoRecurrence.none || TodoRecurrence.daily => _endOfDay(value),
+    };
+
+DateTime _bubbleTodoDueDate(DateTime value, TodoRecurrence recurrence) =>
+    _defaultTodoDueDate(value, recurrence);
+
 List<TodoEntry> visibleTodayTodos(Iterable<TodoEntry> todos, DateTime today) =>
     todos
         .where(
@@ -2843,6 +2884,14 @@ List<TodoEntry> visibleTodayTodos(Iterable<TodoEntry> todos, DateTime today) =>
               todo.completedAt == null &&
               _isSameDay(todo.dueAt ?? todo.createdAt, today),
         )
+        .toList(growable: false);
+
+List<TodoEntry> visibleBubbleTodayTodos(
+  Iterable<TodoEntry> todos,
+  DateTime today,
+) =>
+    todos
+        .where((todo) => _isSameDay(todo.dueAt ?? todo.createdAt, today))
         .toList(growable: false);
 
 DateTime reminderTimeFor(TodoEntry todo) {
@@ -2913,7 +2962,6 @@ class _DeleteTodoDialog extends StatelessWidget {
             const Text(
               '删除 Todo',
               style: TextStyle(
-                fontFamily: 'Microsoft YaHei',
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
                 color: Color(0xff4a4a4a),
@@ -2926,7 +2974,6 @@ class _DeleteTodoDialog extends StatelessWidget {
               */
               '确定要删除“$title”吗？',
               style: const TextStyle(
-                fontFamily: 'Microsoft YaHei',
                 fontSize: 13,
                 height: 1.4,
                 color: Color(0xff4a4a4a),
@@ -2946,7 +2993,6 @@ class _DeleteTodoDialog extends StatelessWidget {
                         borderRadius: BorderRadius.all(Radius.circular(8)),
                       ),
                       textStyle: const TextStyle(
-                        fontFamily: 'Microsoft YaHei',
                         fontSize: 13,
                       ),
                     ),
@@ -2966,7 +3012,6 @@ class _DeleteTodoDialog extends StatelessWidget {
                         borderRadius: BorderRadius.all(Radius.circular(8)),
                       ),
                       textStyle: const TextStyle(
-                        fontFamily: 'Microsoft YaHei',
                         fontSize: 13,
                       ),
                     ),
@@ -3007,7 +3052,6 @@ class _RecurrenceInputButtonState extends State<_RecurrenceInputButton> {
           richMessage: const TextSpan(
             style: TextStyle(
               color: Color(0xff4a4a4a),
-              fontFamily: 'Microsoft YaHei',
               fontSize: 12,
               height: 1.0,
             ),
@@ -3015,7 +3059,6 @@ class _RecurrenceInputButtonState extends State<_RecurrenceInputButton> {
               TextSpan(
                 text: '重复',
                 style: TextStyle(
-                  fontFamily: 'Microsoft YaHei',
                   fontWeight: FontWeight.bold,
                 ),
               ),
@@ -3078,7 +3121,6 @@ class _RecurrenceInputButtonState extends State<_RecurrenceInputButton> {
                         child: Text(
                           todoRecurrenceLabel(item),
                           style: const TextStyle(
-                            fontFamily: 'Microsoft YaHei',
                             fontSize: 12,
                             color: Color(0xff4a4a4a),
                           ),
