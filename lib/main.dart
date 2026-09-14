@@ -36,8 +36,8 @@ const _menuTextStyle = TextStyle(
   color: Color(0xff4a4a4a),
 );
 const _menuShape = RoundedRectangleBorder(
-  borderRadius: BorderRadius.zero,
-  side: BorderSide(color: Color(0xffffb6c1)),
+  borderRadius: BorderRadius.all(Radius.circular(6)),
+  side: BorderSide(color: Color(0xfffde8ed)),
 );
 
 enum _UpdateStatus { idle, available, downloading, failed }
