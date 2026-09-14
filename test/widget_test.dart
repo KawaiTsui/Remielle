@@ -787,6 +787,7 @@ void main() {
         title: '每周任务',
         createdAt: DateTime(2026, 9, 8),
         dueAt: DateTime(2026, 9, 8),
+        completedAt: DateTime(2026, 9, 8, 12),
         recurrence: TodoRecurrence.weekly,
       ),
       const [],
@@ -797,19 +798,16 @@ void main() {
         title: '每月任务',
         createdAt: DateTime(2026, 9, 10),
         dueAt: DateTime(2026, 9, 10),
+        completedAt: DateTime(2026, 9, 10, 12),
         recurrence: TodoRecurrence.monthly,
       ),
       const [],
     );
 
-    final today = DateTime.now();
-    final expectedMonday = DateTime(
-      today.year,
-      today.month,
-      today.day + (7 - today.weekday + 1),
-    );
-    expect(weekly!.dueAt, expectedMonday);
-    expect(monthly!.dueAt, DateTime(today.year, today.month + 1, 1));
+    expect(weekly!.createdAt, DateTime(2026, 9, 14));
+    expect(weekly.dueAt, DateTime(2026, 9, 20, 23, 59, 59, 999));
+    expect(monthly!.createdAt, DateTime(2026, 10, 1));
+    expect(monthly.dueAt, DateTime(2026, 10, 31, 23, 59, 59, 999));
   });
 
   test('未完成 Todo 自动顺延到今天，已完成 Todo 保持原日期', () {
