@@ -3134,10 +3134,10 @@ class _RecurrenceInputButtonState extends State<_RecurrenceInputButton> {
                 elevation: widget.bubbleStyle ? 0 : 4,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(
-                    widget.bubbleStyle ? 8 : 3,
+                    widget.bubbleStyle ? 0 : 3,
                   ),
                   side: widget.bubbleStyle
-                      ? const BorderSide(color: Color(0xfffde8ed))
+                      ? const BorderSide(color: Color(0xffffb6c1))
                       : BorderSide.none,
                 ),
                 constraints: const BoxConstraints(minWidth: 120),

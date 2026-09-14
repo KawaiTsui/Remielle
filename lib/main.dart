@@ -35,6 +35,10 @@ const _menuTextStyle = TextStyle(
   fontSize: 12,
   color: Color(0xff4a4a4a),
 );
+const _menuShape = RoundedRectangleBorder(
+  borderRadius: BorderRadius.zero,
+  side: BorderSide(color: Color(0xffffb6c1)),
+);
 
 enum _UpdateStatus { idle, available, downloading, failed }
 
@@ -1480,10 +1484,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       context: context,
       color: Colors.white,
       elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: const BorderSide(color: Color(0xfffde8ed)),
-      ),
+      shape: _menuShape,
       position: RelativeRect.fromSize(
         Rect.fromLTWH(position.dx, position.dy, 0, 0),
         overlay.size,
@@ -1533,6 +1534,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       final value = await showMenu<TodoRecurrence>(
         context: context,
         color: Colors.white,
+        elevation: 0,
+        shape: _menuShape,
         position: RelativeRect.fromLTRB(
           position.dx,
           position.dy,
@@ -1559,6 +1562,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       final value = await showMenu<String>(
         context: context,
         color: Colors.white,
+        elevation: 0,
+        shape: _menuShape,
         position: RelativeRect.fromLTRB(
           position.dx,
           position.dy,
@@ -1595,6 +1600,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       final value = await showMenu<String>(
         context: context,
         color: Colors.white,
+        elevation: 0,
+        shape: _menuShape,
         position: RelativeRect.fromLTRB(
           position.dx,
           position.dy,
@@ -3699,6 +3706,8 @@ class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
     final selected = await showMenu<String>(
       context: context,
       color: Colors.white,
+      elevation: 0,
+      shape: _menuShape,
       position: RelativeRect.fromLTRB(
         position.dx,
         position.dy,
