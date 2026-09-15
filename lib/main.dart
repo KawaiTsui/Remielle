@@ -1327,25 +1327,20 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   Future<void> _pickBubbleTodoDueDate() async {
-    final picked = await showDatePicker(
+    final picked = await showBubbleDateTimePicker(
       context: context,
-      initialDate: _bubbleTodoDueAt,
+      initialDateTime: _bubbleTodoDueAt,
       firstDate: DateTime(2000),
       lastDate: DateTime(2100),
     );
     if (picked == null || !mounted) return;
-    final pickedTime = await showTimePicker(
-      context: context,
-      initialTime: const TimeOfDay(hour: 23, minute: 59),
-    );
-    if (pickedTime == null || !mounted) return;
     setState(() {
       _bubbleTodoDueAt = DateTime(
         picked.year,
         picked.month,
         picked.day,
-        pickedTime.hour,
-        pickedTime.minute,
+        picked.hour,
+        picked.minute,
         59,
       );
     });
@@ -1363,19 +1358,14 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       final date = now.add(Duration(days: 8 - now.weekday));
       at = DateTime(date.year, date.month, date.day, 9);
     } else if (value == 'custom') {
-      final date = await showDatePicker(
+      final picked = await showBubbleDateTimePicker(
         context: context,
-        initialDate: now,
+        initialDateTime: now,
         firstDate: now,
         lastDate: DateTime(2100),
       );
-      if (date == null || !mounted) return;
-      final time = await showTimePicker(
-        context: context,
-        initialTime: TimeOfDay.fromDateTime(now),
-      );
-      if (time == null || !mounted) return;
-      at = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+      if (picked == null || !mounted) return;
+      at = picked;
     }
     if (at == null) return;
     setState(() {
@@ -1814,6 +1804,11 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
             height: 25,
             child: Text('下周 9:00', style: _menuTextStyle),
           ),
+          PopupMenuItem(
+            value: 'custom',
+            height: 25,
+            child: Text('自定义日期和时间', style: _menuTextStyle),
+          ),
         ],
       );
       if (value != null) await _setBubbleTodoReminder(todo, value);
@@ -1823,37 +1818,29 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   Future<void> _setBubbleTodoDueDate(TodoEntry todo, String value) async {
     final now = DateTime.now();
-    DateTime? date = switch (value) {
+    DateTime date = switch (value) {
       'tomorrow' => now.add(const Duration(days: 1)),
       'nextWeek' => now.add(const Duration(days: 7)),
       _ => now,
     };
     if (value == 'custom') {
       if (!mounted) return;
-      date = await showDatePicker(
+      final picked = await showBubbleDateTimePicker(
         context: context,
-        initialDate: todo.dueAt ?? now,
+        initialDateTime: todo.dueAt ?? now,
         firstDate: DateTime(2000),
         lastDate: DateTime(2100),
       );
-      if (date != null && mounted) {
-        final pickedTime = await showTimePicker(
-          context: context,
-          initialTime: const TimeOfDay(hour: 23, minute: 59),
-        );
-        if (pickedTime != null) {
-          date = DateTime(
-            date.year,
-            date.month,
-            date.day,
-            pickedTime.hour,
-            pickedTime.minute,
-            59,
-          );
-        }
-      }
+      if (picked == null || !mounted) return;
+      date = DateTime(
+        picked.year,
+        picked.month,
+        picked.day,
+        picked.hour,
+        picked.minute,
+        59,
+      );
     }
-    if (date == null) return;
     final current = await _PanelDataStore.load();
     final todos = List<TodoEntry>.of(current.todos);
     final index = todos.indexWhere((item) => item.id == todo.id);
@@ -1867,11 +1854,29 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
 
   Future<void> _setBubbleTodoReminder(TodoEntry todo, String value) async {
     final now = DateTime.now();
-    final at = switch (value) {
-      'tomorrow' => DateTime(now.year, now.month, now.day + 1, 9),
-      'nextWeek' => DateTime(now.year, now.month, now.day + 7, 9),
-      _ => now.add(const Duration(hours: 3)),
-    };
+    DateTime? at;
+    if (value == 'later') {
+      at = DateTime(now.year, now.month, now.day, now.hour + 3);
+    }
+    if (value == 'tomorrow') {
+      final date = now.add(const Duration(days: 1));
+      at = DateTime(date.year, date.month, date.day, 9);
+    }
+    if (value == 'nextWeek') {
+      final date = now.add(Duration(days: 8 - now.weekday));
+      at = DateTime(date.year, date.month, date.day, 9);
+    }
+    if (value == 'custom') {
+      final picked = await showBubbleDateTimePicker(
+        context: context,
+        initialDateTime: now,
+        firstDate: now,
+        lastDate: DateTime(2100),
+      );
+      if (picked == null || !mounted) return;
+      at = picked;
+    }
+    if (at == null) return;
     final current = await _PanelDataStore.load();
     final todos = List<TodoEntry>.of(current.todos);
     final index = todos.indexWhere((item) => item.id == todo.id);
@@ -3497,6 +3502,394 @@ class _BubbleReminderButton extends StatelessWidget {
       ),
     ),
   );
+}
+
+Future<DateTime?> showBubbleDateTimePicker({
+  required BuildContext context,
+  required DateTime initialDateTime,
+  required DateTime firstDate,
+  required DateTime lastDate,
+}) => showDialog<DateTime>(
+  context: context,
+  barrierColor: const Color(0x33000000),
+  builder: (_) => _BubbleDateTimePicker(
+    initialDateTime: initialDateTime,
+    firstDate: firstDate,
+    lastDate: lastDate,
+  ),
+);
+
+class _BubbleDateTimePicker extends StatefulWidget {
+  const _BubbleDateTimePicker({
+    required this.initialDateTime,
+    required this.firstDate,
+    required this.lastDate,
+  });
+
+  final DateTime initialDateTime;
+  final DateTime firstDate;
+  final DateTime lastDate;
+
+  @override
+  State<_BubbleDateTimePicker> createState() => _BubbleDateTimePickerState();
+}
+
+class _BubbleDateTimePickerState extends State<_BubbleDateTimePicker> {
+  late DateTime _selectedDate;
+  late DateTime _visibleMonth;
+  late int _hour;
+  late int _minute;
+  late TextEditingController _dateController;
+  late TextEditingController _timeController;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedDate = _dateOnly(widget.initialDateTime);
+    _visibleMonth = DateTime(_selectedDate.year, _selectedDate.month);
+    _hour = widget.initialDateTime.hour;
+    _minute = widget.initialDateTime.minute;
+    _dateController = TextEditingController(text: _formatDate(_selectedDate));
+    _timeController = TextEditingController(text: _formatTime(_hour, _minute));
+  }
+
+  @override
+  void dispose() {
+    _dateController.dispose();
+    _timeController.dispose();
+    super.dispose();
+  }
+
+  DateTime get _firstDate => _dateOnly(widget.firstDate);
+  DateTime get _lastDate => _dateOnly(widget.lastDate);
+
+  DateTime? get _inputDate => _parseDate(_dateController.text);
+  ({int hour, int minute})? get _inputTime => _parseTime(_timeController.text);
+
+  bool get _canConfirm {
+    final date = _inputDate;
+    return date != null &&
+        !date.isBefore(_firstDate) &&
+        !date.isAfter(_lastDate) &&
+        _inputTime != null;
+  }
+
+  void _selectDate(DateTime date) {
+    if (date.isBefore(_firstDate) || date.isAfter(_lastDate)) return;
+    setState(() {
+      _selectedDate = _dateOnly(date);
+      _visibleMonth = DateTime(date.year, date.month);
+      _dateController.text = _formatDate(_selectedDate);
+    });
+  }
+
+  void _changeMonth(int offset) {
+    final next = DateTime(_visibleMonth.year, _visibleMonth.month + offset);
+    if (next.isBefore(DateTime(_firstDate.year, _firstDate.month)) ||
+        next.isAfter(DateTime(_lastDate.year, _lastDate.month))) {
+      return;
+    }
+    setState(() => _visibleMonth = next);
+  }
+
+  void _onDateChanged(String _) {
+    final date = _inputDate;
+    if (date != null &&
+        !date.isBefore(_firstDate) &&
+        !date.isAfter(_lastDate)) {
+      _selectedDate = date;
+      _visibleMonth = DateTime(date.year, date.month);
+    }
+    setState(() {});
+  }
+
+  void _onTimeChanged(String _) {
+    final time = _inputTime;
+    if (time != null) {
+      _hour = time.hour;
+      _minute = time.minute;
+    }
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+    insetPadding: const EdgeInsets.all(24),
+    backgroundColor: Colors.transparent,
+    elevation: 0,
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          key: const ValueKey('bubble-date-time-picker'),
+          width: 300,
+          constraints: const BoxConstraints(minHeight: 460),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color.fromRGBO(255, 255, 255, 0.7),
+            border: Border.all(color: const Color(0xfffde8ed)),
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x29ffb6c1),
+                blurRadius: 16,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildHeader(),
+              const SizedBox(height: 12),
+              _buildWeekdayHeader(),
+              const SizedBox(height: 12),
+              _buildCalendarGrid(),
+              const SizedBox(height: 12),
+              const Divider(height: 1, color: Color(0xfffde8ed)),
+              const SizedBox(height: 12),
+              _buildInputRow(
+                '日期',
+                _dateController,
+                _onDateChanged,
+                'YYYY-MM-DD',
+              ),
+              const SizedBox(height: 8),
+              _buildInputRow('时间', _timeController, _onTimeChanged, 'HH:MM'),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 36,
+                child: FilledButton(
+                  key: const ValueKey('bubble-date-time-confirm-button'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xffffb6c1),
+                    disabledBackgroundColor: const Color(0xffffdce2),
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(6)),
+                    ),
+                  ),
+                  onPressed: _canConfirm
+                      ? () {
+                          final date = _inputDate!;
+                          final time = _inputTime!;
+                          Navigator.of(context).pop(
+                            DateTime(
+                              date.year,
+                              date.month,
+                              date.day,
+                              time.hour,
+                              time.minute,
+                            ),
+                          );
+                        }
+                      : null,
+                  child: const Text('确定', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget _buildHeader() => SizedBox(
+    height: 22,
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Tooltip(
+          message: '上个月',
+          child: IconButton(
+            onPressed: () => _changeMonth(-1),
+            padding: const EdgeInsets.all(4),
+            constraints: const BoxConstraints.tightFor(width: 20, height: 22),
+            icon: const Text(
+              '◀',
+              style: TextStyle(fontSize: 12, color: Color(0xffffb6c1)),
+            ),
+          ),
+        ),
+        Text(
+          '${_visibleMonth.year}年${_visibleMonth.month}月',
+          style: const TextStyle(fontSize: 12, color: Color(0xff4a4a4a)),
+        ),
+        Tooltip(
+          message: '下个月',
+          child: IconButton(
+            onPressed: () => _changeMonth(1),
+            padding: const EdgeInsets.all(4),
+            constraints: const BoxConstraints.tightFor(width: 20, height: 22),
+            icon: const Text(
+              '▶',
+              style: TextStyle(fontSize: 12, color: Color(0xffffb6c1)),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildWeekdayHeader() => SizedBox(
+    height: 20,
+    child: Row(
+      children: [
+        for (final label in ['日', '一', '二', '三', '四', '五', '六'])
+          Expanded(
+            child: Center(
+              child: Text(
+                label,
+                style: TextStyle(fontSize: 12, color: Color(0xff9ca3af)),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _buildCalendarGrid() {
+    final firstOfMonth = DateTime(_visibleMonth.year, _visibleMonth.month);
+    final start = firstOfMonth.subtract(
+      Duration(days: firstOfMonth.weekday % 7),
+    );
+    return Column(
+      children: List.generate(6, (week) {
+        return Padding(
+          padding: EdgeInsets.only(bottom: week == 5 ? 0 : 4),
+          child: SizedBox(
+            height: 32,
+            child: Row(
+              children: List.generate(7, (weekday) {
+                final date = start.add(Duration(days: week * 7 + weekday));
+                final inMonth = date.month == _visibleMonth.month;
+                final available =
+                    !date.isBefore(_firstDate) && !date.isAfter(_lastDate);
+                final selected = _sameDate(date, _selectedDate);
+                return Expanded(
+                  child: Center(
+                    child: SizedBox(
+                      width: 32,
+                      height: 32,
+                      child: TextButton(
+                        key: ValueKey('bubble-date-cell-${_formatDate(date)}'),
+                        onPressed: available ? () => _selectDate(date) : null,
+                        style: TextButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          minimumSize: const Size(32, 32),
+                          backgroundColor: selected
+                              ? const Color(0xffffb6c1)
+                              : Colors.transparent,
+                          shape: const StadiumBorder(),
+                        ),
+                        child: Text(
+                          '${date.day}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: selected
+                                ? Colors.white
+                                : !available || !inMonth
+                                ? const Color(0xffb2b8c2)
+                                : const Color(0xff4a4a4a),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _buildInputRow(
+    String label,
+    TextEditingController controller,
+    ValueChanged<String> onChanged,
+    String hint,
+  ) => SizedBox(
+    height: 28,
+    child: Row(
+      children: [
+        SizedBox(
+          width: 68,
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 12, color: Color(0xff4a4a4a)),
+          ),
+        ),
+        Expanded(
+          child: TextField(
+            controller: controller,
+            onChanged: onChanged,
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9:-]')),
+            ],
+            style: const TextStyle(fontSize: 12, color: Color(0xff4a4a4a)),
+            decoration: InputDecoration(
+              hintText: hint,
+              hintStyle: const TextStyle(
+                fontSize: 12,
+                color: Color(0xff9ca3af),
+              ),
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 7,
+              ),
+              border: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+                borderSide: BorderSide(color: Color(0xfffde8ed)),
+              ),
+              enabledBorder: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+                borderSide: BorderSide(color: Color(0xfffde8ed)),
+              ),
+              focusedBorder: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+                borderSide: BorderSide(color: Color(0xffffb6c1)),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static DateTime _dateOnly(DateTime value) =>
+      DateTime(value.year, value.month, value.day);
+
+  static bool _sameDate(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  static String _formatDate(DateTime value) =>
+      '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+
+  static String _formatTime(int hour, int minute) =>
+      '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+
+  static DateTime? _parseDate(String value) {
+    final match = RegExp(r'^(\\d{4})-(\\d{2})-(\\d{2})$').firstMatch(value);
+    if (match == null) return null;
+    final date = DateTime(
+      int.parse(match.group(1)!),
+      int.parse(match.group(2)!),
+      int.parse(match.group(3)!),
+    );
+    return _formatDate(date) == value ? date : null;
+  }
+
+  static ({int hour, int minute})? _parseTime(String value) {
+    final match = RegExp(r'^(\\d{2}):(\\d{2})$').firstMatch(value);
+    if (match == null) return null;
+    final hour = int.parse(match.group(1)!);
+    final minute = int.parse(match.group(2)!);
+    return hour < 24 && minute < 60 ? (hour: hour, minute: minute) : null;
+  }
 }
 
 class _BubbleButtonTooltip extends StatelessWidget {

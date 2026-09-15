@@ -277,29 +277,23 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   }
 
   Future<void> _pickNewTodoDueDate() async {
-    final picked = await showDatePicker(
+    final picked = await showPanelDateTimePicker(
       context: context,
-      initialDate: _newTodoDueAt,
+      initialDateTime: _newTodoDueAt,
       firstDate: DateTime(2000),
       lastDate: DateTime(2100),
     );
-    if (picked != null && mounted) {
-      final pickedTime = await showTimePicker(
-        context: context,
-        initialTime: const TimeOfDay(hour: 23, minute: 59),
-      );
-      if (pickedTime == null) return;
-      setState(
-        () => _newTodoDueAt = DateTime(
-          picked.year,
-          picked.month,
-          picked.day,
-          pickedTime.hour,
-          pickedTime.minute,
-          59,
-        ),
-      );
-    }
+    if (picked == null || !mounted) return;
+    setState(
+      () => _newTodoDueAt = DateTime(
+        picked.year,
+        picked.month,
+        picked.day,
+        picked.hour,
+        picked.minute,
+        59,
+      ),
+    );
   }
 
   Future<void> _setReminderPreset({
@@ -320,21 +314,14 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       at = DateTime(d.year, d.month, d.day, 9);
     }
     if (value == 'custom') {
-      final date = await showDatePicker(
+      final picked = await showPanelDateTimePicker(
         context: context,
-        initialDate: now,
+        initialDateTime: now,
         firstDate: now,
         lastDate: DateTime(2100),
       );
-      if (date == null || !mounted) return;
-      await Future<void>.delayed(Duration.zero);
-      if (!mounted) return;
-      final time = await showTimePicker(
-        context: context,
-        initialTime: TimeOfDay.fromDateTime(now),
-      );
-      if (time == null || !mounted) return;
-      at = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+      if (picked == null || !mounted) return;
+      at = picked;
     }
     if (at == null) return;
     if (todo == null) {
@@ -835,28 +822,21 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       if (value == 'nextWeek') date = now.add(const Duration(days: 7));
       if (value == 'custom') {
         if (!mounted) return;
-        date = await showDatePicker(
+        final picked = await showPanelDateTimePicker(
           context: context,
-          initialDate: todo.dueAt ?? todo.createdAt,
+          initialDateTime: todo.dueAt ?? todo.createdAt,
           firstDate: DateTime(2000),
           lastDate: DateTime(2100),
         );
-        if (date != null && mounted) {
-          final pickedTime = await showTimePicker(
-            context: context,
-            initialTime: const TimeOfDay(hour: 23, minute: 59),
-          );
-          if (pickedTime != null) {
-            date = DateTime(
-              date.year,
-              date.month,
-              date.day,
-              pickedTime.hour,
-              pickedTime.minute,
-              59,
-            );
-          }
-        }
+        if (picked == null || !mounted) return;
+        date = DateTime(
+          picked.year,
+          picked.month,
+          picked.day,
+          picked.hour,
+          picked.minute,
+          59,
+        );
       }
       final index = _todos.indexWhere((item) => item.id == todo.id);
       if (date != null && index >= 0) {
@@ -3305,6 +3285,486 @@ class _PanelData {
   final bool skipTodoDeleteConfirmation;
   final bool bubbleVisibleByDefault;
   final bool autoUpdate;
+}
+
+Future<DateTime?> showPanelDateTimePicker({
+  required BuildContext context,
+  required DateTime initialDateTime,
+  required DateTime firstDate,
+  required DateTime lastDate,
+}) => showDialog<DateTime>(
+  context: context,
+  builder: (_) => _PanelDateTimePicker(
+    initialDateTime: initialDateTime,
+    firstDate: firstDate,
+    lastDate: lastDate,
+  ),
+);
+
+class _PanelDateTimePicker extends StatefulWidget {
+  const _PanelDateTimePicker({
+    required this.initialDateTime,
+    required this.firstDate,
+    required this.lastDate,
+  });
+
+  final DateTime initialDateTime;
+  final DateTime firstDate;
+  final DateTime lastDate;
+
+  @override
+  State<_PanelDateTimePicker> createState() => _PanelDateTimePickerState();
+}
+
+class _PanelDateTimePickerState extends State<_PanelDateTimePicker> {
+  late DateTime _selectedDate;
+  late DateTime _visibleMonth;
+  late TextEditingController _dateController;
+  late TextEditingController _timeController;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedDate = _dateOnly(widget.initialDateTime);
+    _visibleMonth = DateTime(_selectedDate.year, _selectedDate.month);
+    _dateController = TextEditingController(text: _formatDate(_selectedDate));
+    _timeController = TextEditingController(
+      text: _formatTime(
+        widget.initialDateTime.hour,
+        widget.initialDateTime.minute,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _dateController.dispose();
+    _timeController.dispose();
+    super.dispose();
+  }
+
+  DateTime get _firstDate => _dateOnly(widget.firstDate);
+  DateTime get _lastDate => _dateOnly(widget.lastDate);
+  DateTime? get _inputDate => _parseDate(_dateController.text);
+  ({int hour, int minute})? get _inputTime => _parseTime(_timeController.text);
+
+  bool get _canConfirm {
+    final date = _inputDate;
+    return date != null &&
+        !date.isBefore(_firstDate) &&
+        !date.isAfter(_lastDate) &&
+        _inputTime != null;
+  }
+
+  void _selectDate(DateTime date) {
+    if (date.isBefore(_firstDate) || date.isAfter(_lastDate)) return;
+    setState(() {
+      _selectedDate = _dateOnly(date);
+      _visibleMonth = DateTime(date.year, date.month);
+      _dateController.text = _formatDate(_selectedDate);
+    });
+  }
+
+  void _changeMonth(int offset) {
+    final next = DateTime(_visibleMonth.year, _visibleMonth.month + offset);
+    if (next.isBefore(DateTime(_firstDate.year, _firstDate.month)) ||
+        next.isAfter(DateTime(_lastDate.year, _lastDate.month))) {
+      return;
+    }
+    setState(() => _visibleMonth = next);
+  }
+
+  void _onDateChanged(String _) {
+    final date = _inputDate;
+    if (date != null &&
+        !date.isBefore(_firstDate) &&
+        !date.isAfter(_lastDate)) {
+      _selectedDate = date;
+      _visibleMonth = DateTime(date.year, date.month);
+    }
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+    insetPadding: const EdgeInsets.all(24),
+    backgroundColor: Colors.transparent,
+    elevation: 0,
+    child: Container(
+      key: const ValueKey('panel-date-time-picker'),
+      width: 500,
+      height: 362,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xffe5e7eb)),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x14000000),
+            blurRadius: 24,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Row(
+        children: [
+          SizedBox(width: 300, child: _buildCalendar()),
+          const VerticalDivider(
+            width: 1,
+            thickness: 1,
+            color: Color(0xffe5e7eb),
+          ),
+          Expanded(child: _buildForm()),
+        ],
+      ),
+    ),
+  );
+
+  Widget _buildCalendar() => Column(
+    children: [
+      Container(
+        height: 32,
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        alignment: Alignment.centerLeft,
+        decoration: const BoxDecoration(
+          color: Color(0xfff9fafb),
+          border: Border(bottom: BorderSide(color: Color(0xffe5e7eb))),
+        ),
+        child: const Text(
+          '选择日期和时间',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            color: Color(0xff4b5563),
+          ),
+        ),
+      ),
+      Expanded(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: Column(
+            children: [
+              _buildMonthNavigator(),
+              const SizedBox(height: 10),
+              _buildWeekdayHeader(),
+              const SizedBox(height: 10),
+              Expanded(child: _buildCalendarGrid()),
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+
+  Widget _buildMonthNavigator() => SizedBox(
+    height: 20,
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Tooltip(
+          message: '上个月',
+          child: IconButton(
+            onPressed: () => _changeMonth(-1),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 20, height: 20),
+            icon: const Icon(
+              Icons.chevron_left,
+              size: 16,
+              color: Color(0xff4b5563),
+            ),
+          ),
+        ),
+        Text(
+          '${_visibleMonth.year}年${_visibleMonth.month}月',
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+            color: Color(0xff111827),
+          ),
+        ),
+        Tooltip(
+          message: '下个月',
+          child: IconButton(
+            onPressed: () => _changeMonth(1),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 20, height: 20),
+            icon: const Icon(
+              Icons.chevron_right,
+              size: 16,
+              color: Color(0xff4b5563),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildWeekdayHeader() => const SizedBox(
+    height: 20,
+    child: Row(
+      children: [
+        Expanded(
+          child: Center(
+            child: Text(
+              '日',
+              style: TextStyle(fontSize: 11, color: Color(0xff9ca3af)),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Text(
+              '一',
+              style: TextStyle(fontSize: 11, color: Color(0xff9ca3af)),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Text(
+              '二',
+              style: TextStyle(fontSize: 11, color: Color(0xff9ca3af)),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Text(
+              '三',
+              style: TextStyle(fontSize: 11, color: Color(0xff9ca3af)),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Text(
+              '四',
+              style: TextStyle(fontSize: 11, color: Color(0xff9ca3af)),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Text(
+              '五',
+              style: TextStyle(fontSize: 11, color: Color(0xff9ca3af)),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Text(
+              '六',
+              style: TextStyle(fontSize: 11, color: Color(0xff9ca3af)),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildCalendarGrid() {
+    final firstOfMonth = DateTime(_visibleMonth.year, _visibleMonth.month);
+    final start = firstOfMonth.subtract(
+      Duration(days: firstOfMonth.weekday % 7),
+    );
+    return Column(
+      children: List.generate(6, (week) {
+        return Expanded(
+          child: Padding(
+            padding: EdgeInsets.only(bottom: week == 5 ? 0 : 2),
+            child: Row(
+              children: List.generate(7, (weekday) {
+                final date = start.add(Duration(days: week * 7 + weekday));
+                final inMonth = date.month == _visibleMonth.month;
+                final available =
+                    !date.isBefore(_firstDate) && !date.isAfter(_lastDate);
+                final selected = _sameDate(date, _selectedDate);
+                return Expanded(
+                  child: Center(
+                    child: SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: TextButton(
+                        key: ValueKey('panel-date-cell-${_formatDate(date)}'),
+                        onPressed: available ? () => _selectDate(date) : null,
+                        style: TextButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          minimumSize: const Size(24, 24),
+                          backgroundColor: selected
+                              ? const Color(0xff0078d4)
+                              : Colors.transparent,
+                          shape: const StadiumBorder(),
+                        ),
+                        child: Text(
+                          '${date.day}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: selected
+                                ? FontWeight.bold
+                                : FontWeight.w500,
+                            color: selected
+                                ? Colors.white
+                                : !available || !inMonth
+                                ? const Color(0xff9ca3af)
+                                : const Color(0xff111827),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _buildForm() => Padding(
+    padding: const EdgeInsets.all(16),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildInputGroup(
+          '日期',
+          _dateController,
+          _onDateChanged,
+          Icons.calendar_today_outlined,
+          'YYYY-MM-DD',
+        ),
+        const SizedBox(height: 14),
+        _buildInputGroup(
+          '时间',
+          _timeController,
+          (_) => setState(() {}),
+          Icons.access_time_outlined,
+          'HH:MM',
+        ),
+        const Spacer(),
+        SizedBox(
+          width: double.infinity,
+          height: 36,
+          child: FilledButton(
+            key: const ValueKey('panel-date-time-confirm-button'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xff0078d4),
+              disabledBackgroundColor: const Color(0xffbfdbf7),
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+              ),
+            ),
+            onPressed: _canConfirm
+                ? () {
+                    final date = _inputDate!;
+                    final time = _inputTime!;
+                    Navigator.of(context).pop(
+                      DateTime(
+                        date.year,
+                        date.month,
+                        date.day,
+                        time.hour,
+                        time.minute,
+                      ),
+                    );
+                  }
+                : null,
+            child: const Text('确定', style: TextStyle(fontSize: 12)),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildInputGroup(
+    String label,
+    TextEditingController controller,
+    ValueChanged<String> onChanged,
+    IconData icon,
+    String hint,
+  ) => SizedBox(
+    height: 51,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: 13,
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 11, color: Color(0xff4b5563)),
+          ),
+        ),
+        const SizedBox(height: 6),
+        SizedBox(
+          height: 32,
+          child: TextField(
+            controller: controller,
+            onChanged: onChanged,
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9:-]')),
+            ],
+            style: const TextStyle(fontSize: 12, color: Color(0xff111827)),
+            decoration: InputDecoration(
+              hintText: hint,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 8,
+              ),
+              suffixIcon: Icon(icon, size: 14, color: const Color(0xff6b7280)),
+              suffixIconConstraints: const BoxConstraints.tightFor(
+                width: 32,
+                height: 32,
+              ),
+              border: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+                borderSide: BorderSide(color: Color(0xffd1d5db)),
+              ),
+              enabledBorder: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+                borderSide: BorderSide(color: Color(0xffd1d5db)),
+              ),
+              focusedBorder: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+                borderSide: BorderSide(color: Color(0xff0078d4)),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static DateTime _dateOnly(DateTime value) =>
+      DateTime(value.year, value.month, value.day);
+  static bool _sameDate(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+  static String _formatDate(DateTime value) =>
+      '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+  static String _formatTime(int hour, int minute) =>
+      '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+
+  static DateTime? _parseDate(String value) {
+    final match = RegExp(r'^(\\d{4})-(\\d{2})-(\\d{2})$').firstMatch(value);
+    if (match == null) return null;
+    final date = DateTime(
+      int.parse(match.group(1)!),
+      int.parse(match.group(2)!),
+      int.parse(match.group(3)!),
+    );
+    return _formatDate(date) == value ? date : null;
+  }
+
+  static ({int hour, int minute})? _parseTime(String value) {
+    final match = RegExp(r'^(\\d{2}):(\\d{2})$').firstMatch(value);
+    if (match == null) return null;
+    final hour = int.parse(match.group(1)!);
+    final minute = int.parse(match.group(2)!);
+    return hour < 24 && minute < 60 ? (hour: hour, minute: minute) : null;
+  }
 }
 
 class _PanelDataStore {

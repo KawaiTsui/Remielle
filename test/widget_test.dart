@@ -171,6 +171,25 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('bubble due date uses the Figma calendar dialog', (tester) async {
+    await _pumpBubbleWindow(tester, _FakePeer());
+    await tester.enterText(find.byType(TextField), 'due-date');
+    await tester.pump();
+
+    await tester.tap(find.byIcon(Icons.calendar_today_outlined));
+    await tester.pumpAndSettle();
+
+    final picker = find.byKey(const ValueKey('bubble-date-time-picker'));
+    expect(picker, findsOneWidget);
+    expect(tester.getSize(picker).width, 300);
+    expect(find.text('\u65e5\u671f'), findsOneWidget);
+    expect(find.text('\u65f6\u95f4'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('bubble-date-time-confirm-button')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('气泡 Todo 右键编辑会进入行内编辑并全选文字', (tester) async {
     await _pumpBubbleWindow(tester, _FakePeer());
     final input = find.byType(TextField);
@@ -211,6 +230,61 @@ void main() {
     final editInput = find.byKey(const ValueKey('bubble-edit-todo-1'));
     await tester.enterText(editInput, '修改后的标题');
     expect(tester.widget<TextField>(editInput).controller!.text, '修改后的标题');
+  });
+
+  testWidgets(
+    'bubble Todo context reminder menu includes custom date and time',
+    (tester) async {
+      await _pumpBubbleWindow(tester, _FakePeer());
+      final input = find.byType(TextField);
+      await tester.enterText(input, 'context-reminder');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.text('context-reminder'),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(PopupMenuItem<String>, '提醒'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.widgetWithText(PopupMenuItem<String>, '自定义日期和时间'),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('bubble custom reminder opens the Figma calendar dialog', (
+    tester,
+  ) async {
+    await _pumpBubbleWindow(tester, _FakePeer());
+    await tester.enterText(find.byType(TextField), 'custom-reminder');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.text('custom-reminder'),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.widgetWithText(PopupMenuItem<String>, '\u63d0\u9192'),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.widgetWithText(
+        PopupMenuItem<String>,
+        '\u81ea\u5b9a\u4e49\u65e5\u671f\u548c\u65f6\u95f4',
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('bubble-date-time-picker')),
+      findsOneWidget,
+    );
   });
 
   testWidgets(
@@ -1025,5 +1099,39 @@ void main() {
 
     expect(editInput, findsNothing);
     expect(find.text('回车提交内容'), findsOneWidget);
+  });
+
+  testWidgets('panel due date uses the Figma date-time dialog', (tester) async {
+    await tester.pumpWidget(const ControlPanelApp());
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('todo-due-date-button')));
+    await tester.pumpAndSettle();
+
+    final picker = find.byKey(const ValueKey('panel-date-time-picker'));
+    expect(picker, findsOneWidget);
+    expect(tester.getSize(picker), const Size(500, 362));
+    expect(find.text('选择日期和时间'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('panel-date-time-confirm-button')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('panel custom reminder uses the Figma date-time dialog', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const ControlPanelApp());
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('todo-reminder-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(PopupMenuItem<String>, '自定义日期和时间'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('panel-date-time-picker')),
+      findsOneWidget,
+    );
   });
 }
