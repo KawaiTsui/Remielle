@@ -1606,6 +1606,11 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
           position.dy,
         ),
         items: TodoRecurrence.values
+            .where(
+              (item) =>
+                  item != TodoRecurrence.none ||
+                  todo.recurrence != TodoRecurrence.none,
+            )
             .map(
               (item) => PopupMenuItem(
                 value: item,
@@ -3780,7 +3785,7 @@ class _TodoBubbleRow extends StatelessWidget {
   }
 
   Widget _buildTodoTitle(TextStyle textStyle, bool draggable) {
-    final title = GestureDetector(
+    final titleContent = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onDoubleTap: onEditTap,
       onSecondaryTapDown: (details) => onMenu(details.globalPosition),
@@ -3790,6 +3795,44 @@ class _TodoBubbleRow extends StatelessWidget {
         children: [Text(todo.title, softWrap: true, style: textStyle)],
       ),
     );
+    final statusLines = <InlineSpan>[];
+    if (todo.recurrence != TodoRecurrence.none) {
+      statusLines.add(
+        TextSpan(text: '循环：${todoRecurrenceLabel(todo.recurrence)}'),
+      );
+    }
+    if (todo.dueAt != null) {
+      statusLines.add(TextSpan(text: '截止：${_formatTodoDateTime(todo.dueAt!)}'));
+    }
+    if (todo.reminderEnabled) {
+      final reminderAt = todo.reminderAt ?? reminderTimeFor(todo);
+      statusLines.add(TextSpan(text: '提醒：${_formatTodoTime(reminderAt)}'));
+    }
+    final title = statusLines.isEmpty
+        ? titleContent
+        : Tooltip(
+            richMessage: TextSpan(
+              style: const TextStyle(
+                color: Color(0xff4a4a4a),
+                fontSize: 12,
+                height: 1.0,
+              ),
+              children: [
+                for (var index = 0; index < statusLines.length; index++) ...[
+                  if (index > 0) const TextSpan(text: '\n'),
+                  statusLines[index],
+                ],
+              ],
+            ),
+            preferBelow: false,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border.all(color: const Color(0xfffde8ed), width: 1),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: titleContent,
+          );
     if (!draggable) return title;
     return LongPressDraggable<TodoEntry>(
       data: todo,
@@ -3809,6 +3852,12 @@ class _TodoBubbleRow extends StatelessWidget {
       child: title,
     );
   }
+
+  String _formatTodoDateTime(DateTime value) =>
+      '${_formatTodoDate(value)} ${_formatTodoTime(value)}';
+
+  String _formatTodoTime(DateTime value) =>
+      '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
 
   Widget _buildSubtaskRows() => Padding(
     padding: const EdgeInsets.only(top: 2, left: 12),

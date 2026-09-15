@@ -799,6 +799,11 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           overlay.size,
         ),
         items: TodoRecurrence.values
+            .where(
+              (item) =>
+                  item != TodoRecurrence.none ||
+                  todo.recurrence != TodoRecurrence.none,
+            )
             .map(
               (item) => PopupMenuItem(
                 value: item,
