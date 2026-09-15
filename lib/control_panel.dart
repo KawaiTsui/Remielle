@@ -3748,7 +3748,7 @@ class _PanelDateTimePickerState extends State<_PanelDateTimePicker> {
       '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
 
   static DateTime? _parseDate(String value) {
-    final match = RegExp(r'^(\\d{4})-(\\d{2})-(\\d{2})$').firstMatch(value);
+    final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value);
     if (match == null) return null;
     final date = DateTime(
       int.parse(match.group(1)!),
@@ -3759,7 +3759,7 @@ class _PanelDateTimePickerState extends State<_PanelDateTimePicker> {
   }
 
   static ({int hour, int minute})? _parseTime(String value) {
-    final match = RegExp(r'^(\\d{2}):(\\d{2})$').firstMatch(value);
+    final match = RegExp(r'^(\d{2}):(\d{2})$').firstMatch(value);
     if (match == null) return null;
     final hour = int.parse(match.group(1)!);
     final minute = int.parse(match.group(2)!);

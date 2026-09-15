@@ -2,5 +2,6 @@
   "files.encoding": "utf8",
   "files.eol": "\n",
   "files.insertFinalNewline": true,
-  "files.autoGuessEncoding": false
+  "files.autoGuessEncoding": false,
+  "cmake.sourceDirectory": "E:/Remielle/windows"
 }

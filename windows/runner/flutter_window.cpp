@@ -440,6 +440,11 @@ bool FlutterWindow::OnCreate() {
           result->Success(flutter::EncodableValue(AttachBubbleWindow(*gap)));
           return;
         }
+        if (call.method_name() == "positionBubbleWindow") {
+          PositionBubbleWindow();
+          result->Success();
+          return;
+        }
         if (call.method_name() == "sendPetEvent") {
           const auto* event = std::get_if<std::string>(call.arguments());
           result->Success(flutter::EncodableValue(

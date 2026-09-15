@@ -26,6 +26,8 @@ const _petBubbleGap = 20.0;
 const _petBubbleWidth = 300.0;
 const _petBubbleMinHeight = 270.0;
 const _petBubbleTailHeight = 10.0;
+const _bubbleDatePickerMinHeight = 460.0;
+const _bubbleDatePickerWindowPadding = 20.0;
 const _bubbleWindowTitle = 'remielle-bubble';
 const _minPetScale = 0.5;
 const _maxPetScale = 2.0;
@@ -617,6 +619,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   bool _petResizeSampleInFlight = false;
   bool _petResizeSamplePending = false;
   late double _bubbleHeight;
+  double? _temporaryBubbleHeight;
   bool _bubbleResizing = false;
   double _bubbleResizeStartHeight = _petBubbleMinHeight;
   double? _bubbleResizeStartCursorY;
@@ -742,6 +745,8 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
           setState(() => _bubbleHeight = (call.arguments as num).toDouble());
           unawaited(_saveWindowPosition());
         }
+      case 'repositionBubble':
+        await _systemChannel.invokeMethod('positionBubbleWindow');
       case 'petEvent':
         final event = call.arguments;
         if (event is String) _handlePetEvent(event);
@@ -1327,7 +1332,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
   }
 
   Future<void> _pickBubbleTodoDueDate() async {
-    final picked = await showBubbleDateTimePicker(
+    final picked = await _showBubbleDateTimePicker(
       context: context,
       initialDateTime: _bubbleTodoDueAt,
       firstDate: DateTime(2000),
@@ -1346,6 +1351,68 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     });
   }
 
+  Future<DateTime?> _showBubbleDateTimePicker({
+    required BuildContext context,
+    required DateTime initialDateTime,
+    required DateTime firstDate,
+    required DateTime lastDate,
+  }) async {
+    if (_isFlutterTest || widget.windowRole != PetWindowRole.bubble) {
+      return showBubbleDateTimePicker(
+        context: context,
+        initialDateTime: initialDateTime,
+        firstDate: firstDate,
+        lastDate: lastDate,
+      );
+    }
+
+    final originalSize = await windowManager.getSize();
+    final originalBubbleHeight = _bubbleHeight;
+    // The native window includes the tail, while the date picker margins do not.
+    final requiredWindowHeight =
+        _bubbleDatePickerMinHeight +
+        _bubbleDatePickerWindowPadding * 2 +
+        _petBubbleTailHeight;
+    final expandedWindowHeight = max(
+      originalSize.height,
+      requiredWindowHeight,
+    );
+    final expanded = expandedWindowHeight > originalSize.height;
+    if (expanded) {
+      setState(
+        () => _temporaryBubbleHeight =
+            expandedWindowHeight - _petBubbleTailHeight,
+      );
+      await WidgetsBinding.instance.endOfFrame;
+      await windowManager.setSize(
+        Size(originalSize.width, expandedWindowHeight),
+      );
+      await _peerWindowController!.invoke('repositionBubble');
+      await WidgetsBinding.instance.endOfFrame;
+    }
+
+    try {
+      return await showBubbleDateTimePicker(
+        context: context,
+        initialDateTime: initialDateTime,
+        firstDate: firstDate,
+        lastDate: lastDate,
+      );
+    } finally {
+      if (expanded) {
+        await windowManager.setSize(originalSize);
+        await _peerWindowController!.invoke('repositionBubble');
+        if (mounted) {
+          setState(() {
+            _temporaryBubbleHeight = null;
+            _bubbleHeight = originalBubbleHeight;
+          });
+        }
+        await WidgetsBinding.instance.endOfFrame;
+      }
+    }
+  }
+
   Future<void> _setBubbleDraftReminder(String value) async {
     final now = DateTime.now();
     DateTime? at;
@@ -1358,12 +1425,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       final date = now.add(Duration(days: 8 - now.weekday));
       at = DateTime(date.year, date.month, date.day, 9);
     } else if (value == 'custom') {
-      final picked = await showBubbleDateTimePicker(
-        context: context,
-        initialDateTime: now,
-        firstDate: now,
-        lastDate: DateTime(2100),
-      );
+      final picked = await _pickBubbleReminderDateTime(now);
       if (picked == null || !mounted) return;
       at = picked;
     }
@@ -1433,6 +1495,34 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     }
   }
 
+  Future<DateTime?> _pickBubbleReminderDateTime(DateTime now) async {
+    final picked = await _showBubbleDateTimePicker(
+      context: context,
+      initialDateTime: now.add(const Duration(hours: 1)),
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked == null || !mounted) return null;
+    if (picked.isBefore(DateTime.now())) await _showPastReminderWarning();
+    return picked;
+  }
+
+  Future<void> _showPastReminderWarning() => showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (context) => AlertDialog(
+      title: const Text('提醒时间已过'),
+      content: const Text('填写的提醒时间早于当前时间。'),
+      actions: [
+        FilledButton(
+          key: const ValueKey('past-reminder-confirm-button'),
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('确认'),
+        ),
+      ],
+    ),
+  );
+
   Future<void> _addBubbleSubtask(TodoEntry todo, String title) async {
     final value = title.trim();
     if (value.isEmpty) return;
@@ -1489,6 +1579,25 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
             (item) =>
                 item.id == subtask.id ? item.copyWith(title: value) : item,
           )
+          .toList(),
+      nextTodoUserModified: todos[index].generatedFromTodoId != null
+          ? true
+          : todos[index].nextTodoUserModified,
+    );
+    await _saveBubbleTodos(current, todos);
+  }
+
+  Future<void> _deleteBubbleSubtask(
+    TodoEntry todo,
+    TodoSubtask subtask,
+  ) async {
+    final current = await _PanelDataStore.load();
+    final todos = List<TodoEntry>.of(current.todos);
+    final index = todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    todos[index] = todos[index].copyWith(
+      subtasks: todos[index].subtasks
+          .where((item) => item.id != subtask.id)
           .toList(),
       nextTodoUserModified: todos[index].generatedFromTodoId != null
           ? true
@@ -1825,7 +1934,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
     };
     if (value == 'custom') {
       if (!mounted) return;
-      final picked = await showBubbleDateTimePicker(
+      final picked = await _showBubbleDateTimePicker(
         context: context,
         initialDateTime: todo.dueAt ?? now,
         firstDate: DateTime(2000),
@@ -1867,12 +1976,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
       at = DateTime(date.year, date.month, date.day, 9);
     }
     if (value == 'custom') {
-      final picked = await showBubbleDateTimePicker(
-        context: context,
-        initialDateTime: now,
-        firstDate: now,
-        lastDate: DateTime(2100),
-      );
+      final picked = await _pickBubbleReminderDateTime(now);
       if (picked == null || !mounted) return;
       at = picked;
     }
@@ -2491,7 +2595,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
           top: 0,
           left: 0,
           child: _TodoSpeechBubble(
-            height: _bubbleHeight,
+            height: _temporaryBubbleHeight ?? _bubbleHeight,
             todos: _todos,
             showAllTodosCompleted: _showingAllTodosCompleted,
             reminderActive: _reminderTodos.isNotEmpty,
@@ -2513,6 +2617,7 @@ class _PetHomeState extends State<PetHome> with WindowListener, TrayListener {
             onAddSubtask: _addBubbleSubtask,
             onToggleSubtask: _toggleBubbleSubtask,
             onRenameSubtask: _renameBubbleSubtask,
+            onDeleteSubtask: _deleteBubbleSubtask,
             onMakeSubtask: _makeBubbleSubtask,
             onMakeSubtaskAt: _makeBubbleSubtask,
             onTodoRecurrenceChanged: _setBubbleTodoRecurrence,
@@ -2751,6 +2856,7 @@ class _TodoSpeechBubble extends StatefulWidget {
     required this.onAddSubtask,
     required this.onToggleSubtask,
     required this.onRenameSubtask,
+    required this.onDeleteSubtask,
     required this.onMakeSubtask,
     required this.onMakeSubtaskAt,
     required this.onTodoRecurrenceChanged,
@@ -2787,6 +2893,7 @@ class _TodoSpeechBubble extends StatefulWidget {
   final Future<void> Function(TodoEntry, String) onAddSubtask;
   final Future<void> Function(TodoEntry, TodoSubtask) onToggleSubtask;
   final Future<void> Function(TodoEntry, TodoSubtask, String) onRenameSubtask;
+  final Future<void> Function(TodoEntry, TodoSubtask) onDeleteSubtask;
   final Future<void> Function(TodoEntry, TodoEntry) onMakeSubtask;
   final Future<void> Function(
     TodoEntry,
@@ -3142,6 +3249,7 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                                             onSubmitSubtask: (_) async {},
                                             onToggleSubtask: (_) async {},
                                             onRenameSubtask: (_, _) async {},
+                                            onDeleteSubtask: (_) async {},
                                             onMakeSubtask: (_) async {},
                                             onMakeSubtaskAt:
                                                 (
@@ -3217,6 +3325,11 @@ class _TodoSpeechBubbleState extends State<_TodoSpeechBubble> {
                                               todos[index],
                                               subtask,
                                               title,
+                                            ),
+                                        onDeleteSubtask: (subtask) =>
+                                            widget.onDeleteSubtask(
+                                              todos[index],
+                                              subtask,
                                             ),
                                         onMakeSubtask: (dragged) =>
                                             widget.onMakeSubtask(
@@ -3511,6 +3624,7 @@ Future<DateTime?> showBubbleDateTimePicker({
   required DateTime lastDate,
 }) => showDialog<DateTime>(
   context: context,
+  barrierDismissible: true,
   barrierColor: const Color(0x33000000),
   builder: (_) => _BubbleDateTimePicker(
     initialDateTime: initialDateTime,
@@ -3614,14 +3728,16 @@ class _BubbleDateTimePickerState extends State<_BubbleDateTimePicker> {
 
   @override
   Widget build(BuildContext context) => Dialog(
-    insetPadding: const EdgeInsets.all(24),
+    insetPadding: EdgeInsets.zero,
     backgroundColor: Colors.transparent,
     elevation: 0,
-    child: ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-        child: Container(
+    child: Transform.translate(
+      offset: const Offset(0, -_petBubbleTailHeight / 2),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+          child: Container(
           key: const ValueKey('bubble-date-time-picker'),
           width: 300,
           constraints: const BoxConstraints(minHeight: 460),
@@ -3638,57 +3754,60 @@ class _BubbleDateTimePickerState extends State<_BubbleDateTimePicker> {
               ),
             ],
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildHeader(),
-              const SizedBox(height: 12),
-              _buildWeekdayHeader(),
-              const SizedBox(height: 12),
-              _buildCalendarGrid(),
-              const SizedBox(height: 12),
-              const Divider(height: 1, color: Color(0xfffde8ed)),
-              const SizedBox(height: 12),
-              _buildInputRow(
-                '日期',
-                _dateController,
-                _onDateChanged,
-                'YYYY-MM-DD',
-              ),
-              const SizedBox(height: 8),
-              _buildInputRow('时间', _timeController, _onTimeChanged, 'HH:MM'),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                height: 36,
-                child: FilledButton(
-                  key: const ValueKey('bubble-date-time-confirm-button'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xffffb6c1),
-                    disabledBackgroundColor: const Color(0xffffdce2),
-                    shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(6)),
-                    ),
-                  ),
-                  onPressed: _canConfirm
-                      ? () {
-                          final date = _inputDate!;
-                          final time = _inputTime!;
-                          Navigator.of(context).pop(
-                            DateTime(
-                              date.year,
-                              date.month,
-                              date.day,
-                              time.hour,
-                              time.minute,
-                            ),
-                          );
-                        }
-                      : null,
-                  child: const Text('确定', style: TextStyle(fontSize: 12)),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                _buildHeader(),
+                const SizedBox(height: 12),
+                _buildWeekdayHeader(),
+                const SizedBox(height: 12),
+                _buildCalendarGrid(),
+                const SizedBox(height: 12),
+                const Divider(height: 1, color: Color(0xfffde8ed)),
+                const SizedBox(height: 12),
+                _buildInputRow(
+                  '日期',
+                  _dateController,
+                  _onDateChanged,
+                  'YYYY-MM-DD',
                 ),
+                const SizedBox(height: 8),
+                _buildInputRow('时间', _timeController, _onTimeChanged, 'HH:MM'),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  height: 36,
+                  child: FilledButton(
+                    key: const ValueKey('bubble-date-time-confirm-button'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xffffb6c1),
+                      disabledBackgroundColor: const Color(0xffffdce2),
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(6)),
+                      ),
+                    ),
+                    onPressed: _canConfirm
+                        ? () {
+                            final date = _inputDate!;
+                            final time = _inputTime!;
+                            Navigator.of(context).pop(
+                              DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                time.hour,
+                                time.minute,
+                              ),
+                            );
+                          }
+                        : null,
+                    child: const Text('确定', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -3725,6 +3844,19 @@ class _BubbleDateTimePickerState extends State<_BubbleDateTimePicker> {
             icon: const Text(
               '▶',
               style: TextStyle(fontSize: 12, color: Color(0xffffb6c1)),
+            ),
+          ),
+        ),
+        Tooltip(
+          message: '关闭',
+          child: IconButton(
+            onPressed: () => Navigator.of(context).pop(),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 22, height: 22),
+            icon: const Icon(
+              Icons.close,
+              size: 14,
+              color: Color(0xff9ca3af),
             ),
           ),
         ),
@@ -4018,6 +4150,63 @@ class _UpdateNotice extends StatelessWidget {
   }
 }
 
+List<InlineSpan> _bubbleTodoStatusSpans(TodoEntry todo) {
+  final statusLines = <InlineSpan>[];
+  if (todo.recurrence != TodoRecurrence.none) {
+    statusLines.add(
+      TextSpan(text: '循环：${todoRecurrenceLabel(todo.recurrence)}'),
+    );
+  }
+  if (todo.dueAt != null) {
+    statusLines.add(
+      TextSpan(text: '截止：${_bubbleTodoDateTime(todo.dueAt!)}'),
+    );
+  }
+  if (todo.reminderEnabled) {
+    final reminderAt = todo.reminderAt ?? reminderTimeFor(todo);
+    statusLines.add(
+      TextSpan(text: '提醒：${_bubbleTodoTime(reminderAt)}'),
+    );
+  }
+  return statusLines;
+}
+
+Widget _bubbleTodoStatusTooltip(TodoEntry todo, Widget child) {
+  final statusLines = _bubbleTodoStatusSpans(todo);
+  if (statusLines.isEmpty) return child;
+  return Tooltip(
+    richMessage: TextSpan(
+      style: const TextStyle(
+        color: Color(0xff4a4a4a),
+        fontSize: 12,
+        height: 20 / 12,
+      ),
+      children: [
+        for (var index = 0; index < statusLines.length; index++) ...[
+          if (index > 0) const TextSpan(text: '\n'),
+          statusLines[index],
+        ],
+      ],
+    ),
+    preferBelow: false,
+    waitDuration: const Duration(milliseconds: 1500),
+    verticalOffset: 3,
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border.all(color: const Color(0xfffde8ed), width: 1),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+    child: child,
+  );
+}
+
+String _bubbleTodoDateTime(DateTime value) =>
+    '${_formatTodoDate(value)} ${_bubbleTodoTime(value)}';
+
+String _bubbleTodoTime(DateTime value) =>
+    '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+
 class _TodoBubbleRow extends StatelessWidget {
   const _TodoBubbleRow({
     required this.todo,
@@ -4034,6 +4223,7 @@ class _TodoBubbleRow extends StatelessWidget {
     required this.onSubmitSubtask,
     required this.onToggleSubtask,
     required this.onRenameSubtask,
+    required this.onDeleteSubtask,
     required this.onMakeSubtask,
     required this.onMakeSubtaskAt,
     required this.onRecurrenceChanged,
@@ -4057,6 +4247,7 @@ class _TodoBubbleRow extends StatelessWidget {
   final Future<void> Function(String) onSubmitSubtask;
   final Future<void> Function(TodoSubtask) onToggleSubtask;
   final Future<void> Function(TodoSubtask, String) onRenameSubtask;
+  final Future<void> Function(TodoSubtask) onDeleteSubtask;
   final Future<void> Function(TodoEntry) onMakeSubtask;
   final Future<void> Function(TodoEntry, {String? targetSubtaskId, bool after})
   onMakeSubtaskAt;
@@ -4246,12 +4437,14 @@ class _TodoBubbleRow extends StatelessWidget {
                                       'bubble-subtask-${todo.id}-${entry.value.id}-${entry.key}',
                                     ),
                                     subtask: entry.value,
+                                    parentTodo: todo,
                                     parentId: todo.id,
                                     parentCompleted: completed,
                                     onToggle: () =>
                                         onToggleSubtask(entry.value),
                                     onRename: (value) =>
                                         onRenameSubtask(entry.value, value),
+                                    onDelete: () => onDeleteSubtask(entry.value),
                                     onPromote: () => onPromoteSubtask(
                                       TodoSubtaskDragData(
                                         parentId: todo.id,
@@ -4321,44 +4514,7 @@ class _TodoBubbleRow extends StatelessWidget {
         children: [Text(todo.title, softWrap: true, style: textStyle)],
       ),
     );
-    final statusLines = <InlineSpan>[];
-    if (todo.recurrence != TodoRecurrence.none) {
-      statusLines.add(
-        TextSpan(text: '循环：${todoRecurrenceLabel(todo.recurrence)}'),
-      );
-    }
-    if (todo.dueAt != null) {
-      statusLines.add(TextSpan(text: '截止：${_formatTodoDateTime(todo.dueAt!)}'));
-    }
-    if (todo.reminderEnabled) {
-      final reminderAt = todo.reminderAt ?? reminderTimeFor(todo);
-      statusLines.add(TextSpan(text: '提醒：${_formatTodoTime(reminderAt)}'));
-    }
-    final title = statusLines.isEmpty
-        ? titleContent
-        : Tooltip(
-            richMessage: TextSpan(
-              style: const TextStyle(
-                color: Color(0xff4a4a4a),
-                fontSize: 12,
-                height: 1.0,
-              ),
-              children: [
-                for (var index = 0; index < statusLines.length; index++) ...[
-                  if (index > 0) const TextSpan(text: '\n'),
-                  statusLines[index],
-                ],
-              ],
-            ),
-            preferBelow: false,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              border: Border.all(color: const Color(0xfffde8ed), width: 1),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            child: titleContent,
-          );
+    final title = _bubbleTodoStatusTooltip(todo, titleContent);
     if (!draggable) return title;
     return LongPressDraggable<TodoEntry>(
       data: todo,
@@ -4378,12 +4534,6 @@ class _TodoBubbleRow extends StatelessWidget {
       child: title,
     );
   }
-
-  String _formatTodoDateTime(DateTime value) =>
-      '${_formatTodoDate(value)} ${_formatTodoTime(value)}';
-
-  String _formatTodoTime(DateTime value) =>
-      '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
 
   Widget _buildSubtaskRows() => Padding(
     padding: const EdgeInsets.only(top: 2, left: 12),
@@ -4465,10 +4615,12 @@ class _TodoBubbleRow extends StatelessWidget {
                   'bubble-subtask-${todo.id}-${entry.value.id}-${entry.key}',
                 ),
                 subtask: entry.value,
+                parentTodo: todo,
                 parentId: todo.id,
                 parentCompleted: todo.completedAt != null,
                 onToggle: () => onToggleSubtask(entry.value),
                 onRename: (value) => onRenameSubtask(entry.value, value),
+                onDelete: () => onDeleteSubtask(entry.value),
                 onPromote: () => onPromoteSubtask(
                   TodoSubtaskDragData(
                     parentId: todo.id,
@@ -4529,19 +4681,23 @@ class _BubbleSubtaskRow extends StatefulWidget {
   const _BubbleSubtaskRow({
     super.key,
     required this.subtask,
+    required this.parentTodo,
     required this.parentId,
     required this.parentCompleted,
     required this.onToggle,
     required this.onRename,
+    required this.onDelete,
     required this.onPromote,
     required this.onMove,
   });
 
   final TodoSubtask subtask;
+  final TodoEntry parentTodo;
   final int parentId;
   final bool parentCompleted;
   final VoidCallback onToggle;
   final ValueChanged<String> onRename;
+  final Future<void> Function() onDelete;
   final VoidCallback onPromote;
   final Future<void> Function(TodoSubtaskDragData, String?, bool) onMove;
 
@@ -4594,9 +4750,15 @@ class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
           height: 25,
           child: Text('编辑', style: _menuTextStyle),
         ),
+        PopupMenuItem<String>(
+          value: 'delete',
+          height: 25,
+          child: Text('删除', style: _menuTextStyle),
+        ),
       ],
     );
     if (selected == 'edit' && mounted) _startEditing();
+    if (selected == 'delete' && mounted) await widget.onDelete();
   }
 
   late final TextEditingController _controller = TextEditingController(
@@ -4666,7 +4828,9 @@ class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
             ),
             const SizedBox(width: 7),
             Expanded(
-              child: widget.parentCompleted
+              child: _bubbleTodoStatusTooltip(
+                widget.parentTodo,
+                widget.parentCompleted
                   ? Text(
                       widget.subtask.title,
                       style: const TextStyle(
@@ -4716,6 +4880,7 @@ class _BubbleSubtaskRowState extends State<_BubbleSubtaskRow> {
                         ),
                       ),
                     ),
+                ),
             ),
           ],
         ),
