@@ -115,13 +115,18 @@ class _ControlPanelPageState extends State<ControlPanelPage>
   TodoRecurrence _newTodoRecurrence = TodoRecurrence.none;
   int? _newTodoReminderOffsetMinutes;
   DateTime? _newTodoReminderAt;
-  DateTime _newTodoDueAt = _defaultTodoDueDate(DateTime.now(), TodoRecurrence.none);
+  DateTime _newTodoDueAt = _defaultTodoDueDate(
+    DateTime.now(),
+    TodoRecurrence.none,
+  );
   bool _checkingForUpdate = false;
   bool _updatingStartup = false;
   bool _closing = false;
   bool _inputSessionActive = false;
   int? _hoveredTodoId;
   int? _editingTodoId;
+  int? _editingSubtaskParentId;
+  String? _editingSubtaskId;
   int? _addingSubtaskTodoId;
   String _pendingSubtaskTitle = '';
   final Set<int> _expandedSubtaskTodoIds = <int>{};
@@ -284,14 +289,16 @@ class _ControlPanelPageState extends State<ControlPanelPage>
         initialTime: const TimeOfDay(hour: 23, minute: 59),
       );
       if (pickedTime == null) return;
-      setState(() => _newTodoDueAt = DateTime(
-            picked.year,
-            picked.month,
-            picked.day,
-            pickedTime.hour,
-            pickedTime.minute,
-            59,
-          ));
+      setState(
+        () => _newTodoDueAt = DateTime(
+          picked.year,
+          picked.month,
+          picked.day,
+          pickedTime.hour,
+          pickedTime.minute,
+          59,
+        ),
+      );
     }
   }
 
@@ -512,6 +519,102 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     _endInputSession();
   }
 
+  Future<void> _startEditingSubtask(TodoEntry todo, TodoSubtask subtask) async {
+    if (_editingTodoId != null) _finishEditing();
+    if (_editingSubtaskParentId == todo.id && _editingSubtaskId == subtask.id) {
+      return;
+    }
+    _editController.text = subtask.title;
+    setState(() {
+      _editingSubtaskParentId = todo.id;
+      _editingSubtaskId = subtask.id;
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted ||
+        _editingSubtaskParentId != todo.id ||
+        _editingSubtaskId != subtask.id) {
+      return;
+    }
+    _editFocusNode.requestFocus();
+    _editController.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _editController.text.length,
+    );
+  }
+
+  Future<void> _finishEditingSubtask() async {
+    final parentId = _editingSubtaskParentId;
+    final subtaskId = _editingSubtaskId;
+    if (parentId == null || subtaskId == null) return;
+    final value = _editController.text.trim();
+    final index = _todos.indexWhere((todo) => todo.id == parentId);
+    setState(() {
+      if (index >= 0 && value.isNotEmpty) {
+        final todo = _todos[index];
+        _todos[index] = todo.copyWith(
+          subtasks: todo.subtasks
+              .map(
+                (item) =>
+                    item.id == subtaskId ? item.copyWith(title: value) : item,
+              )
+              .toList(),
+        );
+      }
+      _editingSubtaskParentId = null;
+      _editingSubtaskId = null;
+    });
+    _editFocusNode.unfocus();
+    _endInputSession();
+    await _savePanelData();
+  }
+
+  Future<void> _deleteSubtask(TodoEntry todo, TodoSubtask subtask) async {
+    final index = _todos.indexWhere((item) => item.id == todo.id);
+    if (index < 0) return;
+    if (_editingSubtaskParentId == todo.id && _editingSubtaskId == subtask.id) {
+      setState(() {
+        _editingSubtaskParentId = null;
+        _editingSubtaskId = null;
+      });
+      _editFocusNode.unfocus();
+    }
+    setState(
+      () => _todos[index] = todo.copyWith(
+        subtasks: todo.subtasks.where((item) => item.id != subtask.id).toList(),
+      ),
+    );
+    await _savePanelData();
+  }
+
+  Future<void> _showSubtaskMenu(
+    TodoEntry todo,
+    TodoSubtask subtask,
+    Offset globalPosition,
+  ) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final position = overlay.globalToLocal(globalPosition);
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromSize(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        overlay.size,
+      ),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.all(Radius.circular(3)),
+      ),
+      items: const [
+        PopupMenuItem(value: 'edit', height: 36, child: Text('编辑')),
+        PopupMenuItem(value: 'delete', height: 36, child: Text('删除')),
+      ],
+    );
+    if (!mounted) return;
+    if (selected == 'edit') {
+      await _startEditingSubtask(todo, subtask);
+    } else if (selected == 'delete') {
+      await _deleteSubtask(todo, subtask);
+    }
+  }
+
   Future<void> _setTodoRecurrence(
     TodoEntry todo,
     TodoRecurrence recurrence,
@@ -564,17 +667,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             .toList(),
       );
     });
-    await _savePanelData();
-  }
-
-  Future<void> _deleteSubtask(TodoEntry todo, TodoSubtask subtask) async {
-    final index = _todos.indexWhere((item) => item.id == todo.id);
-    if (index < 0) return;
-    setState(
-      () => _todos[index] = todo.copyWith(
-        subtasks: todo.subtasks.where((item) => item.id != subtask.id).toList(),
-      ),
-    );
     await _savePanelData();
   }
 
@@ -750,8 +842,14 @@ class _ControlPanelPageState extends State<ControlPanelPage>
             initialTime: const TimeOfDay(hour: 23, minute: 59),
           );
           if (pickedTime != null) {
-            date = DateTime(date.year, date.month, date.day,
-                pickedTime.hour, pickedTime.minute, 59);
+            date = DateTime(
+              date.year,
+              date.month,
+              date.day,
+              pickedTime.hour,
+              pickedTime.minute,
+              59,
+            );
           }
         }
       }
@@ -1410,7 +1508,8 @@ class _ControlPanelPageState extends State<ControlPanelPage>
           ],
         ),
       ),
-      if (todo.subtasks.isNotEmpty) _buildControlPanelSubtasks(todo, completed),
+      if (todo.subtasks.isNotEmpty && _expandedSubtaskTodoIds.contains(todo.id))
+        _buildControlPanelSubtasks(todo, completed),
       DragTarget<Object>(
         onWillAcceptWithDetails: (details) =>
             (details.data is TodoEntry &&
@@ -1451,8 +1550,6 @@ class _ControlPanelPageState extends State<ControlPanelPage>
     },
     child: GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onSecondaryTapDown: (details) =>
-          _showTodoMenu(todo, details.globalPosition),
       child: AnimatedContainer(
         key: ValueKey('todo-row-background-${todo.id}'),
         duration: const Duration(milliseconds: 100),
@@ -1635,39 +1732,57 @@ class _ControlPanelPageState extends State<ControlPanelPage>
                         color: Colors.transparent,
                         child: Text(subtask.title),
                       ),
-                      child: Row(
-                        children: [
-                          Checkbox(
-                            value: subtask.isCompleted,
-                            onChanged: parentCompleted
-                                ? null
-                                : (_) => _toggleSubtask(todo, subtask),
-                          ),
-                          Expanded(
-                            child: Text(
-                              subtask.title,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: parentCompleted
-                                    ? const Color(0xff666666)
-                                    : const Color(0xff1a1a1a),
-                                decoration: parentCompleted
-                                    ? TextDecoration.lineThrough
-                                    : null,
-                              ),
+                      child: GestureDetector(
+                        key: ValueKey('subtask-row-${todo.id}-${subtask.id}'),
+                        behavior: HitTestBehavior.opaque,
+                        onSecondaryTapDown: (details) => _showSubtaskMenu(
+                          todo,
+                          subtask,
+                          details.globalPosition,
+                        ),
+                        child: Row(
+                          children: [
+                            Checkbox(
+                              value: subtask.isCompleted,
+                              onChanged: parentCompleted
+                                  ? null
+                                  : (_) => _toggleSubtask(todo, subtask),
                             ),
-                          ),
-                          if (!parentCompleted)
-                            SizedBox.square(
-                              dimension: 26,
-                              child: IconButton(
-                                tooltip: '删除子项',
-                                padding: EdgeInsets.zero,
-                                onPressed: () => _deleteSubtask(todo, subtask),
-                                icon: const Icon(Icons.remove, size: 14),
-                              ),
+                            Expanded(
+                              child:
+                                  _editingSubtaskParentId == todo.id &&
+                                      _editingSubtaskId == subtask.id
+                                  ? TextField(
+                                      controller: _editController,
+                                      focusNode: _editFocusNode,
+                                      autofocus: true,
+                                      style: const TextStyle(fontSize: 13),
+                                      decoration: const InputDecoration(
+                                        isDense: true,
+                                        contentPadding: EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                          vertical: 2,
+                                        ),
+                                      ),
+                                      textInputAction: TextInputAction.done,
+                                      onSubmitted: (_) =>
+                                          _finishEditingSubtask(),
+                                    )
+                                  : Text(
+                                      subtask.title,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: parentCompleted
+                                            ? const Color(0xff666666)
+                                            : const Color(0xff1a1a1a),
+                                        decoration: parentCompleted
+                                            ? TextDecoration.lineThrough
+                                            : null,
+                                      ),
+                                    ),
                             ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                     _buildSubtaskDropZone(todo, subtask, after: true),
@@ -1708,6 +1823,8 @@ class _ControlPanelPageState extends State<ControlPanelPage>
       key: ValueKey('todo-title-${todo.id}'),
       behavior: HitTestBehavior.opaque,
       onTap: completed ? null : () => _startEditing(todo),
+      onSecondaryTapDown: (details) =>
+          _showTodoMenu(todo, details.globalPosition),
       child: Align(
         alignment: Alignment.centerLeft,
         child: Text(
@@ -2428,7 +2545,8 @@ DateTime? nextRecurringEligibleAt(TodoEntry todo, DateTime completedAt) {
   }
   final today = _startOfDay(completedAt);
   final dueAt = todo.dueAt ?? _defaultTodoDueDate(completedAt, todo.recurrence);
-  if (completedAt.isAfter(dueAt) || dueAt.isBefore(today.subtract(_longOverdueRecurrenceThreshold))) {
+  if (completedAt.isAfter(dueAt) ||
+      dueAt.isBefore(today.subtract(_longOverdueRecurrenceThreshold))) {
     return null;
   }
   return _nextRecurringDueDate(completedAt, todo.recurrence);
@@ -2437,7 +2555,11 @@ DateTime? nextRecurringEligibleAt(TodoEntry todo, DateTime completedAt) {
 DateTime _nextRecurringDueDate(DateTime date, TodoRecurrence recurrence) =>
     switch (recurrence) {
       TodoRecurrence.daily => date.add(const Duration(days: 1)),
-      TodoRecurrence.weekly => DateTime(date.year, date.month, date.day + (8 - date.weekday)),
+      TodoRecurrence.weekly => DateTime(
+        date.year,
+        date.month,
+        date.day + (8 - date.weekday),
+      ),
       TodoRecurrence.monthly => DateTime(date.year, date.month + 1, 1),
       TodoRecurrence.none => date,
     };
@@ -2611,11 +2733,8 @@ class TodoEntry {
       title: json['title'] as String,
       createdAt: createdAt ?? DateTime.now(),
       sortOrder: sortOrder,
-      dueAt: dueAt ??
-          _defaultTodoDueDate(
-            createdAt ?? DateTime.now(),
-            recurrence,
-          ),
+      dueAt:
+          dueAt ?? _defaultTodoDueDate(createdAt ?? DateTime.now(), recurrence),
       completedAt: completedAt,
       recurrence: recurrence,
       subtasks: (json['subtasks'] as List<dynamic>? ?? const [])
@@ -2869,8 +2988,12 @@ DateTime _endOfDay(DateTime value) =>
 
 DateTime _defaultTodoDueDate(DateTime value, TodoRecurrence recurrence) =>
     switch (recurrence) {
-      TodoRecurrence.weekly => _endOfDay(DateTime(value.year, value.month, value.day + (7 - value.weekday))),
-      TodoRecurrence.monthly => _endOfDay(DateTime(value.year, value.month + 1, 0)),
+      TodoRecurrence.weekly => _endOfDay(
+        DateTime(value.year, value.month, value.day + (7 - value.weekday)),
+      ),
+      TodoRecurrence.monthly => _endOfDay(
+        DateTime(value.year, value.month + 1, 0),
+      ),
       TodoRecurrence.none || TodoRecurrence.daily => _endOfDay(value),
     };
 
@@ -2889,10 +3012,9 @@ List<TodoEntry> visibleTodayTodos(Iterable<TodoEntry> todos, DateTime today) =>
 List<TodoEntry> visibleBubbleTodayTodos(
   Iterable<TodoEntry> todos,
   DateTime today,
-) =>
-    todos
-        .where((todo) => _isSameDay(todo.dueAt ?? todo.createdAt, today))
-        .toList(growable: false);
+) => todos
+    .where((todo) => _isSameDay(todo.dueAt ?? todo.createdAt, today))
+    .toList(growable: false);
 
 DateTime reminderTimeFor(TodoEntry todo) {
   final dueAt = _startOfDay(todo.dueAt ?? todo.createdAt);
@@ -2992,9 +3114,7 @@ class _DeleteTodoDialog extends StatelessWidget {
                       shape: const RoundedRectangleBorder(
                         borderRadius: BorderRadius.all(Radius.circular(8)),
                       ),
-                      textStyle: const TextStyle(
-                        fontSize: 13,
-                      ),
+                      textStyle: const TextStyle(fontSize: 13),
                     ),
                     child: const Text('取消'),
                   ),
@@ -3011,9 +3131,7 @@ class _DeleteTodoDialog extends StatelessWidget {
                       shape: const RoundedRectangleBorder(
                         borderRadius: BorderRadius.all(Radius.circular(8)),
                       ),
-                      textStyle: const TextStyle(
-                        fontSize: 13,
-                      ),
+                      textStyle: const TextStyle(fontSize: 13),
                     ),
                     child: const Text('删除'),
                   ),
@@ -3058,9 +3176,7 @@ class _RecurrenceInputButtonState extends State<_RecurrenceInputButton> {
             children: [
               TextSpan(
                 text: '重复',
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(fontWeight: FontWeight.bold),
               ),
               TextSpan(text: '\n\n设置任务重复周期'),
             ],
@@ -3142,10 +3258,16 @@ class _RecurrenceInputButtonState extends State<_RecurrenceInputButton> {
                 ),
                 constraints: const BoxConstraints(minWidth: 120),
                 padding: const EdgeInsets.all(3),
-                child: const SizedBox(
+                child: SizedBox(
                   width: 16,
                   height: 16,
-                  child: Icon(Icons.sync, color: Color(0xff9ca3af), size: 15),
+                  child: Icon(
+                    Icons.sync,
+                    color: widget.bubbleStyle
+                        ? const Color(0xffffb6c1)
+                        : const Color(0xff9ca3af),
+                    size: 15,
+                  ),
                 ),
               ),
             ),
