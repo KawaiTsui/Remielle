@@ -33,7 +33,8 @@ class FlutterWindow : public Win32Window {
   void RequestCaretStateQuery();
   void StartCaretStateQuery();
   void PublishCaretState(bool active);
-  void SetBubbleWindowRegion(bool visible, double pet_height);
+  bool AttachBubbleWindow(double gap);
+  void PositionBubbleWindow();
 
   static LRESULT CALLBACK FlutterViewSubclassProc(
       HWND window, UINT message, WPARAM wparam, LPARAM lparam,
@@ -64,6 +65,8 @@ class FlutterWindow : public Win32Window {
       system_channel_;
   IUIAutomation* ui_automation_ = nullptr;
   HANDLE control_panel_job_ = nullptr;
+  HWND bubble_window_ = nullptr;
+  double bubble_gap_ = 0;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

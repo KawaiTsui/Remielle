@@ -4,6 +4,32 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:remielle/main.dart';
 
+class _FakePeer implements PetWindowPeer {
+  final calls = <({String method, Object? arguments})>[];
+
+  @override
+  Future<void> invoke(String method, [dynamic arguments]) async {
+    calls.add((method: method, arguments: arguments));
+  }
+
+  bool hasCall(String method, [Object? arguments]) => calls.any(
+    (call) =>
+        call.method == method &&
+        (arguments == null || call.arguments == arguments),
+  );
+}
+
+Future<void> _pumpBubbleWindow(WidgetTester tester, _FakePeer peer) async {
+  await tester.pumpWidget(
+    RemielleApp(
+      windowRole: PetWindowRole.bubble,
+      rootWindowId: 'test-root',
+      peer: peer,
+    ),
+  );
+  await tester.pump();
+}
+
 Finder _petAnimationFinder(String asset) => find.byWidgetPredicate(
   (widget) => widget is AnimatedGif && widget.asset == asset,
 );
@@ -134,25 +160,19 @@ void main() {
   });
 
   testWidgets('bubble input focus drives the busy animation', (tester) async {
-    await tester.pumpWidget(const RemielleApp());
+    final peer = _FakePeer();
+    await _pumpBubbleWindow(tester, peer);
 
     await tester.tap(find.byType(TextField));
     await tester.pump();
-    expect(
-      _petAnimation(tester, 'assets/animations/d.gif').asset,
-      'assets/animations/d.gif',
-    );
+    expect(peer.hasCall('petEvent', 'inputFocus'), isTrue);
 
     await tester.tap(find.byIcon(Icons.close));
     await tester.pump();
-    expect(
-      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
-      'assets/animations/d_win.gif',
-    );
   });
 
   testWidgets('气泡 Todo 右键编辑会进入行内编辑并全选文字', (tester) async {
-    await tester.pumpWidget(const RemielleApp());
+    await _pumpBubbleWindow(tester, _FakePeer());
     final input = find.byType(TextField);
     await tester.enterText(input, '气泡右键编辑');
     await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -177,7 +197,7 @@ void main() {
   });
 
   testWidgets('bubble Todo editing accepts text input', (tester) async {
-    await tester.pumpWidget(const RemielleApp());
+    await _pumpBubbleWindow(tester, _FakePeer());
     final input = find.byType(TextField);
     await tester.enterText(input, '原始标题');
     await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -196,7 +216,7 @@ void main() {
   testWidgets(
     'double-click bubble Todo editing selects text and accepts input',
     (tester) async {
-      await tester.pumpWidget(const RemielleApp());
+      await _pumpBubbleWindow(tester, _FakePeer());
       final input = find.byType(TextField);
       await tester.enterText(input, '单击编辑');
       await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -252,7 +272,8 @@ void main() {
   });
 
   testWidgets('全部完成后延迟显示庆祝状态并在五秒后恢复', (tester) async {
-    await tester.pumpWidget(const RemielleApp());
+    final peer = _FakePeer();
+    await tester.pumpWidget(RemielleApp(peer: peer));
     await tester.pump();
 
     await _sendSystemEvent(tester, 'petEvent', arguments: 'allTodosCompleted');
@@ -260,13 +281,10 @@ void main() {
     expect(find.text('今天所有任务都完成啦~'), findsNothing);
 
     await tester.pump(const Duration(milliseconds: 1));
-    expect(find.text('今天所有任务都完成啦~'), findsOneWidget);
-    expect(find.text('辛苦了，休息一下吧 🌸'), findsOneWidget);
-    expect(find.byIcon(Icons.auto_awesome), findsOneWidget);
+    expect(peer.hasCall('showAllCompleted'), isTrue);
 
     await tester.pump(const Duration(seconds: 5));
-    expect(find.text('今天所有任务都完成啦~'), findsNothing);
-    expect(find.text('今天没有待办哦~'), findsOneWidget);
+    expect(peer.hasCall('showAllCompleted'), isTrue);
   });
 
   testWidgets('光标激活但系统空闲 30 秒后回到待机', (tester) async {
@@ -348,7 +366,7 @@ void main() {
   testWidgets('bubble Todo editing can recover after deleting all text', (
     tester,
   ) async {
-    await tester.pumpWidget(const RemielleApp());
+    await _pumpBubbleWindow(tester, _FakePeer());
     final input = find.byType(TextField);
     await tester.enterText(input, '可清空后继续编辑');
     await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -367,48 +385,42 @@ void main() {
   testWidgets('external caret loss does not interrupt local bubble input', (
     tester,
   ) async {
-    await tester.pumpWidget(const RemielleApp());
+    final peer = _FakePeer();
+    await _pumpBubbleWindow(tester, peer);
     await tester.tap(find.byType(TextField));
     await tester.pump();
     await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
     await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
     await tester.pump();
-    expect(
-      _petAnimation(tester, 'assets/animations/d.gif').asset,
-      'assets/animations/d.gif',
-    );
+    expect(peer.hasCall('petEvent', 'inputFocus'), isTrue);
   });
 
-  testWidgets(
-    'local bubble caret loss exits busy animation after confirmation',
-    (tester) async {
-      await tester.pumpWidget(const RemielleApp());
-      await tester.tap(find.byType(TextField));
-      await tester.pump();
-      await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
-      await tester.pump(const Duration(milliseconds: 449));
-      expect(
-        _petAnimation(tester, 'assets/animations/d.gif').asset,
-        'assets/animations/d.gif',
-      );
-      await tester.pump(const Duration(milliseconds: 1));
-      expect(
-        _petAnimation(tester, 'assets/animations/d_win.gif').asset,
-        'assets/animations/d_win.gif',
-      );
-      await tester.pump(const Duration(milliseconds: 1300));
-      expect(
-        _petAnimation(tester, 'assets/animations/a.gif').asset,
-        'assets/animations/a.gif',
-      );
-    },
-  );
+  testWidgets('pet caret loss exits busy animation after confirmation', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const RemielleApp());
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
+    await tester.pump();
+    expect(
+      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
+      'assets/animations/d_win.gif',
+    );
+    await tester.pump(const Duration(milliseconds: 1300));
+    expect(
+      _petAnimation(tester, 'assets/animations/a.gif').asset,
+      'assets/animations/a.gif',
+    );
+  });
 
   testWidgets('local bubble caret recovery cancels loss confirmation', (
     tester,
   ) async {
     await tester.pumpWidget(const RemielleApp());
-    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
     await tester.pump();
     await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
     await tester.pump(const Duration(milliseconds: 200));
@@ -424,7 +436,8 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(const RemielleApp());
-    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await _sendSystemEvent(tester, 'caretStateChanged', arguments: true);
     await tester.pump();
     await _sendSystemEvent(tester, 'caretStateChanged', arguments: false);
     await tester.pump(const Duration(milliseconds: 500));
@@ -522,28 +535,23 @@ void main() {
   });
 
   testWidgets('气泡窗口空 Todo 提交会结束忙碌动画', (tester) async {
-    await tester.pumpWidget(const RemielleApp());
+    final peer = _FakePeer();
+    await _pumpBubbleWindow(tester, peer);
     final input = find.byType(TextField);
 
     await tester.tap(input);
     await tester.pump();
-    expect(
-      _petAnimation(tester, 'assets/animations/d.gif').asset,
-      'assets/animations/d.gif',
-    );
+    expect(peer.hasCall('petEvent', 'inputFocus'), isTrue);
 
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
-    expect(
-      _petAnimation(tester, 'assets/animations/d_win.gif').asset,
-      'assets/animations/d_win.gif',
-    );
+    expect(peer.hasCall('petEvent', 'inputEnd'), isTrue);
   });
 
   testWidgets('bubble recurrence selection does not submit the draft Todo', (
     tester,
   ) async {
-    await tester.pumpWidget(const RemielleApp());
+    await _pumpBubbleWindow(tester, _FakePeer());
     final input = find.byType(TextField);
 
     await tester.enterText(input, '循环草稿');

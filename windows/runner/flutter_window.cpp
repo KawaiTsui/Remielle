@@ -4,8 +4,11 @@
 #include <atomic>
 #include <commctrl.h>
 #include <cstdint>
+#include <cmath>
 #include <optional>
 #include <string>
+
+#include <desktop_multi_window/desktop_multi_window_plugin.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -20,6 +23,26 @@ constexpr UINT kCaretStateChangedMessage = WM_APP + 1;
 constexpr UINT kKeyboardActivityMessage = WM_APP + 2;
 constexpr UINT kCaretQueryResultMessage = WM_APP + 3;
 constexpr ULONG_PTR kPetEventDataId = 0x524D454C;
+constexpr wchar_t kBubbleWindowTitle[] = L"remielle-bubble";
+
+struct BubbleWindowSearchContext {
+  DWORD process_id;
+  HWND owner;
+  HWND result = nullptr;
+};
+
+BOOL CALLBACK FindBubbleWindow(HWND window, LPARAM data) {
+  auto* context = reinterpret_cast<BubbleWindowSearchContext*>(data);
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(window, &process_id);
+  if (process_id != context->process_id || window == context->owner) return TRUE;
+  wchar_t title[64] = {};
+  GetWindowTextW(window, title,
+                 static_cast<int>(sizeof(title) / sizeof(title[0])));
+  if (std::wstring(title) != kBubbleWindowTitle) return TRUE;
+  context->result = window;
+  return FALSE;
+}
 
 struct PetWindowSearchContext {
   DWORD current_process_id;
@@ -334,6 +357,11 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  DesktopMultiWindowSetWindowCreatedCallback([](void* controller) {
+    auto* view_controller =
+        reinterpret_cast<flutter::FlutterViewController*>(controller);
+    RegisterPlugins(view_controller->engine());
+  });
   if (constrain_to_work_area_) {
     control_panel_job_ = CreateJobObjectW(nullptr, nullptr);
     if (control_panel_job_) {
@@ -392,30 +420,24 @@ bool FlutterWindow::OnCreate() {
           result->Success();
           return;
         }
-        if (call.method_name() == "setBubbleWindowRegion") {
+        if (call.method_name() == "attachBubbleWindow") {
           const auto* args =
               std::get_if<flutter::EncodableMap>(call.arguments());
           if (!args) {
             result->Error("invalid_arguments");
             return;
           }
-          const auto visible_it =
-              args->find(flutter::EncodableValue("visible"));
-          const auto pet_height_it =
-              args->find(flutter::EncodableValue("petHeight"));
-          if (visible_it == args->end() || pet_height_it == args->end()) {
+          const auto gap_it = args->find(flutter::EncodableValue("gap"));
+          if (gap_it == args->end()) {
             result->Error("invalid_arguments");
             return;
           }
-          const auto* visible = std::get_if<bool>(&visible_it->second);
-          const auto* pet_height =
-              std::get_if<double>(&pet_height_it->second);
-          if (!visible || !pet_height) {
+          const auto* gap = std::get_if<double>(&gap_it->second);
+          if (!gap) {
             result->Error("invalid_arguments");
             return;
           }
-          SetBubbleWindowRegion(*visible, *pet_height);
-          result->Success();
+          result->Success(flutter::EncodableValue(AttachBubbleWindow(*gap)));
           return;
         }
         if (call.method_name() == "sendPetEvent") {
@@ -581,31 +603,47 @@ void FlutterWindow::PublishCaretState(bool active) {
   }
 }
 
-void FlutterWindow::SetBubbleWindowRegion(bool visible, double pet_height) {
-  const HWND window = GetHandle();
-  if (!window) return;
-  if (visible) {
-    SetWindowRgn(window, nullptr, FALSE);
+bool FlutterWindow::AttachBubbleWindow(double gap) {
+  BubbleWindowSearchContext context{GetCurrentProcessId(), GetHandle()};
+  EnumWindows(FindBubbleWindow, reinterpret_cast<LPARAM>(&context));
+  if (!context.result) return false;
+  bubble_window_ = context.result;
+  bubble_gap_ = gap;
+  SetWindowLongPtrW(bubble_window_, GWLP_HWNDPARENT,
+                    reinterpret_cast<LONG_PTR>(GetHandle()));
+  PositionBubbleWindow();
+  return true;
+}
+
+void FlutterWindow::PositionBubbleWindow() {
+  if (!IsWindow(bubble_window_)) {
+    bubble_window_ = nullptr;
     return;
   }
-
-  RECT bounds = {};
-  if (!GetWindowRect(window, &bounds)) return;
-  const int width = bounds.right - bounds.left;
-  const int height = bounds.bottom - bounds.top;
-  const double scale = static_cast<double>(GetDpiForWindow(window)) / 96.0;
-  const int pet_height_pixels = static_cast<int>(pet_height * scale);
-  HRGN pet_region =
-      CreateRectRgn(0, std::max(0, height - pet_height_pixels), width, height);
-  if (pet_region && !SetWindowRgn(window, pet_region, FALSE)) {
-    DeleteObject(pet_region);
+  RECT pet = {};
+  RECT bubble = {};
+  if (!GetWindowRect(GetHandle(), &pet) ||
+      !GetWindowRect(bubble_window_, &bubble)) {
+    return;
   }
+  const int bubble_width = bubble.right - bubble.left;
+  const int bubble_height = bubble.bottom - bubble.top;
+  const int pet_width = pet.right - pet.left;
+  const double dpi_scale = static_cast<double>(GetDpiForWindow(GetHandle())) / 96.0;
+  const int gap = static_cast<int>(std::round(bubble_gap_ * dpi_scale));
+  SetWindowPos(bubble_window_, nullptr,
+               pet.left + (pet_width - bubble_width) / 2,
+               pet.top - gap - bubble_height, bubble_width, bubble_height,
+               SWP_NOACTIVATE | SWP_NOZORDER);
 }
 
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (constrain_to_work_area_ && message == WM_WINDOWPOSCHANGED) {
+    PositionBubbleWindow();
+  }
   if (message == kCaretStateChangedMessage) {
     g_caret_event_pending.store(false);
     if (g_foreground_change_pending.exchange(false) && caret_active_) {
@@ -666,12 +704,29 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (GetMonitorInfo(monitor, &monitor_info)) {
       const LONG width = proposed->right - proposed->left;
       const LONG height = proposed->bottom - proposed->top;
-      proposed->left =
-          std::clamp(proposed->left, monitor_info.rcWork.left,
-                     monitor_info.rcWork.right - width);
-      proposed->top =
-          std::clamp(proposed->top, monitor_info.rcWork.top,
-                     monitor_info.rcWork.bottom - height);
+      LONG minimum_left = monitor_info.rcWork.left;
+      LONG maximum_left = monitor_info.rcWork.right - width;
+      LONG minimum_top = monitor_info.rcWork.top;
+      if (IsWindowVisible(bubble_window_)) {
+        RECT bubble = {};
+        GetWindowRect(bubble_window_, &bubble);
+        const LONG bubble_width = bubble.right - bubble.left;
+        const LONG bubble_height = bubble.bottom - bubble.top;
+        const LONG bubble_offset = (width - bubble_width) / 2;
+        const LONG gap = static_cast<LONG>(
+            std::round(bubble_gap_ * GetDpiForWindow(hwnd) / 96.0));
+        minimum_left =
+            std::max(minimum_left, monitor_info.rcWork.left - bubble_offset);
+        maximum_left = std::min(
+            maximum_left,
+            monitor_info.rcWork.right - bubble_width - bubble_offset);
+        minimum_top += bubble_height + gap;
+      }
+      minimum_left = std::min(minimum_left, maximum_left);
+      const LONG maximum_top = monitor_info.rcWork.bottom - height;
+      minimum_top = std::min(minimum_top, maximum_top);
+      proposed->left = std::clamp(proposed->left, minimum_left, maximum_left);
+      proposed->top = std::clamp(proposed->top, minimum_top, maximum_top);
       proposed->right = proposed->left + width;
       proposed->bottom = proposed->top + height;
       return TRUE;
